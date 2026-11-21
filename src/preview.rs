@@ -9,7 +9,7 @@
 //! pair, Core continues with a later pair, so a match must be regenerated with
 //! the exact keygen and its public key compared before use.
 
-use tide_fn_dsa_comm::{codec, mq, shake::SHAKE256};
+use tide_fn_dsa_comm::{codec, mq};
 use tide_fn_dsa_kgen::{FALCON_KEYGEN_SEED_SIZE, FN_DSA_LOGN_512, VRFY_KEY_SIZE_512};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -144,45 +144,45 @@ impl Preview {
     }
 }
 
-/// SHAKE256 output read in blocks. Falcon's get_rng_u64 reads the same
-/// stream eight little-endian bytes at a time, so values and order match.
+/// SHAKE256 squeezed one Keccak lane at a time. Falcon's get_rng_u64 reads
+/// eight little-endian bytes at a time from offset 0, and the 136-byte rate is
+/// 17 whole lanes, so every value it reads is exactly one state lane.
 struct Stream {
-    shake: SHAKE256,
-    buf: [u8; 8 * 136],
-    pos: usize,
+    state: [u64; 25],
+    lane: usize,
 }
 
+const RATE_LANES: usize = 136 / 8;
+
 impl Stream {
-    fn new(seed: &[u8]) -> Self {
-        let mut shake = SHAKE256::new();
-        shake.inject(seed).expect("inject precedes flip");
-        shake.flip().expect("single flip");
+    fn new(seed: &[u8; FALCON_KEYGEN_SEED_SIZE]) -> Self {
+        let mut state = [0; 25];
+        for (lane, bytes) in state.iter_mut().zip(seed.as_chunks::<8>().0) {
+            *lane = u64::from_le_bytes(*bytes);
+        }
+        // SHAKE padding: suffix 1111 and the first pad bit after the 48-byte
+        // seed, the final pad bit in the last byte of the rate.
+        state[FALCON_KEYGEN_SEED_SIZE / 8] ^= 0x1F;
+        state[RATE_LANES - 1] ^= 0x80 << 56;
         Self {
-            shake,
-            buf: [0; 8 * 136],
-            pos: 8 * 136,
+            state,
+            lane: RATE_LANES,
         }
     }
 
     fn next_u64(&mut self) -> u64 {
-        if self.pos == self.buf.len() {
-            self.shake
-                .extract(&mut self.buf)
-                .expect("extract follows flip");
-            self.pos = 0;
+        if self.lane == RATE_LANES {
+            keccak::f1600(&mut self.state);
+            self.lane = 0;
         }
-        let bytes = self.buf[self.pos..self.pos + 8]
-            .try_into()
-            .expect("eight bytes");
-        self.pos += 8;
-        u64::from_le_bytes(bytes)
+        self.lane += 1;
+        self.state[self.lane - 1]
     }
 }
 
 impl Drop for Stream {
     fn drop(&mut self) {
-        self.shake.zeroize();
-        self.buf.zeroize();
+        self.state.zeroize();
     }
 }
 
@@ -232,7 +232,25 @@ fn sample(stream: &mut Stream, f: &mut [i8; N]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tide_fn_dsa_comm::shake::SHAKE256;
     use tide_fn_dsa_kgen::{KeyPairGenerator512, SIGN_KEY_SIZE_512};
+
+    #[test]
+    fn lanes_match_the_backend_shake256_stream() {
+        for byte in [0, 0x5a, 0xff] {
+            let seed = [byte; FALCON_KEYGEN_SEED_SIZE];
+            let mut shake = SHAKE256::new();
+            shake.inject(&seed).unwrap();
+            shake.flip().unwrap();
+            let mut stream = Stream::new(&seed);
+            // Several blocks, crossing permutation boundaries.
+            for _ in 0..5 * RATE_LANES + 3 {
+                let mut bytes = [0; 8];
+                shake.extract(&mut bytes).unwrap();
+                assert_eq!(stream.next_u64(), u64::from_le_bytes(bytes));
+            }
+        }
+    }
 
     #[test]
     fn previews_match_exact_keygen() {
