@@ -20,7 +20,7 @@ The downloadable archive includes the tested Apple Silicon release binary at `bi
 | `--workers=<NUMBER_OF_THREADS>` | Positive integer. Defaults to the logical CPU count available to the process. |
 | `--out=<DESTINATION>` | Required. Saves one line in the historical `address:WIF` format. An existing destination causes an error. |
 
-Supply at least one pattern. When both are present, the same address must satisfy both. For a quick key-generation or wallet-recovery test, use `--prefix=T`. Progress on stderr reports completed keypairs across all workers. Stdout receives the public address after the key file is saved. Ctrl+C interrupts the search.
+Supply at least one pattern. When both are present, the same address must satisfy both. For a quick key-generation or wallet-recovery test, use `--prefix=T`. Before searching, stderr shows the expected number of keypairs per match, and progress lines add the average time per match at the current rate. Patterns that need more than 2⁶⁴ keypairs are refused. This also covers patterns that no checksummed address can match. Progress on stderr reports completed keypairs across all workers. Stdout receives the public address after the key file is saved. Ctrl+C interrupts the search.
 
 ## Protocol and wallet recovery
 
@@ -56,7 +56,7 @@ cargo test --release --locked
 cargo clippy --all-targets --locked -- -D warnings
 ```
 
-The regression tests compare the complete legacy WIF with Core's public fixture, compare seeded key digests with Core's Falcon C implementation, and check a published P2SH script/address vector. They also cover matching, concurrent publication that keeps the losing record, private output including inherited macOS ACLs, and rejection of existing files. The published fixture key is public test data. [Core wallet fixture](https://github.com/tidecoin/tidecoin/blob/ffed4e92e60ff2de30361648a71cba64531f9077/src/test/data/falcon512_legacy_wif.json) · [Core address vectors](https://github.com/tidecoin/tidecoin/blob/ffed4e92e60ff2de30361648a71cba64531f9077/src/test/data/key_io_valid.json)
+The regression tests compare the complete legacy WIF with Core's public fixture, compare seeded key digests with Core's Falcon C implementation, and check a published P2SH script/address vector. They also cover matching, difficulty limits, concurrent publication that keeps the losing record, private output including inherited macOS ACLs, and rejection of existing files. The published fixture key is public test data. [Core wallet fixture](https://github.com/tidecoin/tidecoin/blob/ffed4e92e60ff2de30361648a71cba64531f9077/src/test/data/falcon512_legacy_wif.json) · [Core address vectors](https://github.com/tidecoin/tidecoin/blob/ffed4e92e60ff2de30361648a71cba64531f9077/src/test/data/key_io_valid.json)
 
 The locked dependency versions were compared with the advisory ranges in the [RustSec database snapshot](https://github.com/RustSec/advisory-db/tree/f291af9b1cc0d21dfcea1709d6b037963cef262b). None of the published ranges in that snapshot applied.
 

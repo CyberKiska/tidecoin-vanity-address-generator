@@ -97,13 +97,6 @@ fn script_hash(public: &Public) -> ScriptHash {
     Ripemd160::digest(Sha256::digest(redeem)).into()
 }
 
-pub fn is_address(text: &Address) -> bool {
-    bs58::decode(text)
-        .with_check(Some(SCRIPT_VERSION))
-        .onto(&mut [0; 25][..])
-        == Ok(21)
-}
-
 pub fn address(hash: &ScriptHash) -> Address {
     let mut bytes = [0; ADDRESS_LEN];
     let len = bs58::encode(hash)

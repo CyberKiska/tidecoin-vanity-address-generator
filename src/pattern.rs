@@ -3,6 +3,10 @@ use std::ops::RangeInclusive;
 
 const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
+/// 2^64 keypairs is beyond any hardware. A pattern that no checksummed address
+/// matches fixes so many characters that its estimate is far above this too.
+pub const MAX_EXPECTED_ATTEMPTS: f64 = 18_446_744_073_709_551_616.0;
+
 pub struct Pattern {
     prefix: Vec<u8>,
     postfix: Vec<u8>,
@@ -44,36 +48,31 @@ impl Pattern {
             *slot = ch;
         }
         let prefix_len = mask.iter().position(|&b| b == 0).unwrap_or(ADDRESS_LEN);
-        let gap = (ADDRESS_LEN - postfix.len()).saturating_sub(prefix_len);
-        if gap <= 2 && !has_checksummed_completion(mask, prefix_len, gap) {
-            return Err("no checksummed mainnet address matches this pattern");
-        }
         let prefix = mask[..prefix_len].to_vec();
         let range =
             prefix_bounds(&prefix).ok_or("prefix is outside the mainnet T address range")?;
-        let result = Self {
+        Ok(Self {
             prefix,
             postfix: postfix.to_vec(),
             range,
-        };
-        // When a long prefix spans only a few script hashes, check their actual
-        // checksums up front. This includes fully specified addresses.
-        let mut hash = *result.range.start();
-        for _ in 0..128 {
-            if result.candidate(&hash).is_some() {
-                break;
-            }
-            if &hash == result.range.end() {
-                return Err("no checksummed mainnet address matches this pattern");
-            }
-            for byte in hash.iter_mut().rev() {
-                *byte = byte.wrapping_add(1);
-                if *byte != 0 {
-                    break;
-                }
-            }
+        })
+    }
+
+    /// Expected keypairs per match. The prefix odds are the width of its
+    /// script-hash interval. Trailing digits carry the checksum, so each free
+    /// suffix digit is close to uniform.
+    pub fn expected_attempts(&self) -> f64 {
+        let (lo, hi) = (self.range.start(), self.range.end());
+        let mut width = [0u8; 20];
+        let mut borrow = 0;
+        for i in (0..20).rev() {
+            let d = hi[i] as i16 - lo[i] as i16 - borrow;
+            borrow = (d < 0) as i16;
+            width[i] = (d + 256 * borrow) as u8;
         }
-        Ok(result)
+        let width = width.iter().fold(0.0, |acc, &b| acc * 256.0 + b as f64) + 1.0;
+        let free_suffix = self.postfix.len().min(ADDRESS_LEN - self.prefix.len());
+        2f64.powi(160) / width * 58f64.powi(free_suffix as i32)
     }
 
     pub fn candidate(&self, hash: &ScriptHash) -> Option<Address> {
@@ -83,18 +82,6 @@ impl Pattern {
         let text = address(hash);
         (text.starts_with(&self.prefix) && text.ends_with(&self.postfix)).then_some(text)
     }
-}
-
-// A prefix and a long postfix can leave only one or two free digits even if
-// their numeric interval is wide. Check these cases without generating keys.
-fn has_checksummed_completion(mut mask: Address, start: usize, gap: usize) -> bool {
-    (0..58usize.pow(gap as u32)).any(|mut n| {
-        for byte in &mut mask[start..start + gap] {
-            *byte = ALPHABET[n % 58];
-            n /= 58;
-        }
-        crate::protocol::is_address(&mask)
-    })
 }
 
 #[cfg(test)]
@@ -118,7 +105,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unreachable_patterns() {
+    fn rejects_invalid_and_infeasible_patterns() {
         for (p, s) in [
             ("", ""),
             ("TE0", ""),
@@ -131,9 +118,26 @@ mod tests {
             ("", &"a".repeat(35)),
             ("TDGs8UFaMRu5Ru8hBAE7SNkwrtYXBaFXHV", ""),
             ("T", "Gs8UFaMRu5Ru8hBAE7SNkwrtYXBaFXHV"),
+            ("T", &"1".repeat(30)),
+            ("TDGs8UFaMRu5Ru8hBAE7", ""),
         ] {
-            assert!(Pattern::new(p, s).is_err(), "accepted {p} / {s}");
+            let feasible = Pattern::new(p, s)
+                .is_ok_and(|pattern| pattern.expected_attempts() <= MAX_EXPECTED_ATTEMPTS);
+            assert!(!feasible, "accepted {p} / {s}");
         }
+    }
+
+    #[test]
+    fn expected_attempts_match_pattern_odds() {
+        let expected = |p, s| Pattern::new(p, s).unwrap().expected_attempts();
+        assert_eq!(expected("T", ""), 1.0);
+        assert_eq!(expected("", "zz"), 58.0 * 58.0);
+        // Second digits '9' through 'Y' share the version-65 interval.
+        assert!((23.0..23.7).contains(&expected("TD", "")));
+        assert!((23.0 * 58.0..23.7 * 58.0).contains(&expected("TD", "7")));
+        // Overlapping parts are scored once, as the merged address.
+        let full = "TDGs8UFaMRu5Ru8hBAE7SNkwrtYXBaFXHU";
+        assert_eq!(expected(&full[..20], &full[18..]), expected(full, ""));
     }
 
     #[test]

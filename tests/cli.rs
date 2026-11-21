@@ -85,6 +85,22 @@ fn inherited_acl_entries_are_refused_before_mining() {
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 
+#[test]
+fn infeasible_patterns_are_refused_before_mining() {
+    let dir = tempdir().unwrap();
+    let dest = dir.path().join("match.wif");
+    // No checksummed address has this suffix, so the old matcher ran forever.
+    let postfix = format!("--postfix={}", "1".repeat(30));
+    let result = cli()
+        .args(["--prefix=T", &postfix, "--out"])
+        .arg(&dest)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("keypairs per match"));
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
 #[cfg(unix)]
 #[test]
 fn existing_and_dangling_symlinks_are_rejected() {

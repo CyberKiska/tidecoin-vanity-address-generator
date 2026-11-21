@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use output::Destination;
-use pattern::Pattern;
+use pattern::{MAX_EXPECTED_ATTEMPTS, Pattern};
 use protocol::{Address, KeyPair};
 use tide_fn_dsa_kgen::KeyPairGenerator512;
 
@@ -57,7 +57,11 @@ fn search(pattern: &Pattern, workers: usize) -> io::Result<(Address, KeyPair)> {
     let stop = AtomicBool::new(false);
     let attempts = AtomicU64::new(0);
     let start = Instant::now();
-    let _ = writeln!(io::stderr().lock(), "Search workers: {workers}");
+    let expected = pattern.expected_attempts();
+    let _ = writeln!(
+        io::stderr().lock(),
+        "Search workers: {workers}, about {expected:.3e} keypairs per match"
+    );
     let result = thread::scope(|scope| {
         let (tx, rx) = mpsc::channel();
         let (stop, attempts) = (&stop, &attempts);
@@ -91,26 +95,47 @@ fn search(pattern: &Pattern, workers: usize) -> io::Result<(Address, KeyPair)> {
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(io::Error::other("all workers exited"));
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => report(attempts, start),
+                Err(mpsc::RecvTimeoutError::Timeout) => report(attempts, start, Some(expected)),
             }
         }
     });
-    report(&attempts, start);
+    report(&attempts, start, None);
     result
 }
 
-fn report(attempts: &AtomicU64, start: Instant) {
+fn report(attempts: &AtomicU64, start: Instant, expected: Option<f64>) {
     let n = attempts.load(Relaxed);
+    let rate = n as f64 / start.elapsed().as_secs_f64();
+    let eta = expected.map_or(String::new(), |e| {
+        // The search is memoryless: the average wait never shrinks.
+        let secs = e / rate;
+        let (div, unit) = [
+            (31_557_600.0, "years"),
+            (86_400.0, "days"),
+            (3_600.0, "hours"),
+            (60.0, "minutes"),
+        ]
+        .into_iter()
+        .find(|&(div, _)| secs >= 2.0 * div)
+        .unwrap_or((1.0, "seconds"));
+        format!(", about {:.1} {unit} per match on average", secs / div)
+    });
     let _ = writeln!(
         io::stderr().lock(),
-        "{n} keypairs checked, {:.1}/s",
-        n as f64 / start.elapsed().as_secs_f64()
+        "{n} keypairs checked, {rate:.1}/s{eta}"
     );
 }
 
 fn run(args: Args) -> io::Result<()> {
     let pattern = Pattern::new(&args.prefix, &args.postfix)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let expected = pattern.expected_attempts();
+    if expected > MAX_EXPECTED_ATTEMPTS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("pattern needs about {expected:.1e} keypairs per match; the limit is 2^64"),
+        ));
+    }
     let dest = Destination::check(&args.out)?;
     let workers = args
         .workers
