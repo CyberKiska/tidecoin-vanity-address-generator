@@ -41,7 +41,17 @@ impl<'a> Destination<'a> {
         file.write_all(wif)?;
         file.write_all(b"\n")?;
         file.as_file().sync_all()?;
-        file.persist_noclobber(self.path).map_err(|e| e.error)?;
+        if let Err(tempfile::PersistError { error, file }) = file.persist_noclobber(self.path) {
+            // Never discard a mined key: leave the synced staging file in place.
+            let kept = match file.keep() {
+                Ok((_, path)) => format!("the key file was kept at {}", path.display()),
+                Err(e) => format!("keeping the staged key file also failed: {}", e.error),
+            };
+            return Err(io::Error::new(
+                error.kind(),
+                format!("cannot publish {}: {error}; {kept}", self.path.display()),
+            ));
+        }
         #[cfg(unix)]
         fs::File::open(self.parent)
             .and_then(|dir| dir.sync_all())
@@ -162,7 +172,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn competing_publishers_cannot_replace_a_completed_record() {
+    fn a_losing_publisher_keeps_its_record_instead_of_replacing_or_dropping_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("address.wif");
         let dest = Destination::check(&path).unwrap();
@@ -171,15 +181,19 @@ mod tests {
             let b = s.spawn(|| dest.save(b"second", b"k2"));
             let results = [a.join().unwrap(), b.join().unwrap()];
             assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
-            assert_eq!(
-                results.into_iter().find_map(Result::err).unwrap().kind(),
-                io::ErrorKind::AlreadyExists
-            );
+            let err = results.into_iter().find_map(Result::err).unwrap();
+            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+            assert!(err.to_string().contains("kept at"), "{err}");
         });
         assert!(matches!(
             fs::read(path).unwrap().as_slice(),
             b"first:k1\n" | b"second:k2\n"
         ));
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        let mut records: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| fs::read(e.unwrap().path()).unwrap())
+            .collect();
+        records.sort();
+        assert_eq!(records, [b"first:k1\n".to_vec(), b"second:k2\n".to_vec()]);
     }
 }
