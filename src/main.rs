@@ -1,3 +1,4 @@
+mod keccak2;
 mod output;
 mod pattern;
 mod preview;
@@ -14,7 +15,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use output::Destination;
 use pattern::{MAX_EXPECTED_ATTEMPTS, Pattern};
-use preview::Preview;
+use preview::{Preview, Seed};
 use protocol::{Address, KeyPair, script_hash};
 use tide_fn_dsa_kgen::{FALCON_KEYGEN_SEED_SIZE, KeyPairGenerator512, VRFY_KEY_SIZE_512};
 use zeroize::Zeroizing;
@@ -44,13 +45,13 @@ fn worker(
     stop: &AtomicBool,
     attempts: &AtomicU64,
 ) -> io::Result<Option<(Address, KeyPair)>> {
-    let preview = Preview::new();
+    let mut preview = Preview::new();
+    let mut fresh = |seed: &mut Seed| getrandom::fill(seed).map_err(io::Error::other);
     let mut generator = KeyPairGenerator512::default();
     let mut seed = Zeroizing::new([0; FALCON_KEYGEN_SEED_SIZE]);
     let mut public = [0; VRFY_KEY_SIZE_512];
     while !stop.load(Relaxed) {
-        getrandom::fill(&mut *seed).map_err(io::Error::other)?;
-        preview.public_key(&seed, &mut public);
+        preview.next(&mut fresh, &mut seed, &mut public)?;
         attempts.fetch_add(1, Relaxed);
         let Some(addr) = pattern.candidate(&script_hash(&public)) else {
             continue;
