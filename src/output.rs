@@ -73,7 +73,48 @@ fn private_temp(parent: &Path) -> io::Result<NamedTempFile> {
             "the output volume cannot create an owner-only file",
         ));
     }
+    // macOS evaluates ACL entries before mode bits, so an inherited allow entry
+    // defeats 0600. Check by descriptor before any secret is written: a reader
+    // who opened the file early through such an entry only ever sees it empty.
+    // Linux default ACLs are masked by the 0600 creation mode.
+    #[cfg(target_os = "macos")]
+    if has_acl_entries(file.as_file())? {
+        return Err(io::Error::other(
+            "new files in the output directory inherit ACL entries; choose a private directory",
+        ));
+    }
     Ok(file)
+}
+
+#[cfg(target_os = "macos")]
+fn has_acl_entries(file: &fs::File) -> io::Result<bool> {
+    use std::ffi::{c_int, c_void};
+    use std::os::fd::AsRawFd;
+    const ACL_TYPE_EXTENDED: c_int = 0x100;
+    const ACL_FIRST_ENTRY: c_int = 0;
+    unsafe extern "C" {
+        fn acl_get_fd_np(fd: c_int, ty: c_int) -> *mut c_void;
+        fn acl_get_entry(acl: *mut c_void, id: c_int, entry: *mut *mut c_void) -> c_int;
+        fn acl_free(obj: *mut c_void) -> c_int;
+    }
+    // SAFETY: the descriptor stays open for the call. The returned ACL is only
+    // read by acl_get_entry and then freed exactly once.
+    unsafe {
+        let acl = acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED);
+        if acl.is_null() {
+            let e = io::Error::last_os_error();
+            // ENOENT means the file has no extended ACL.
+            return if e.kind() == io::ErrorKind::NotFound {
+                Ok(false)
+            } else {
+                Err(e)
+            };
+        }
+        let mut entry = std::ptr::null_mut();
+        let found = acl_get_entry(acl, ACL_FIRST_ENTRY, &mut entry) == 0;
+        acl_free(acl);
+        Ok(found)
+    }
 }
 
 #[cfg(windows)]

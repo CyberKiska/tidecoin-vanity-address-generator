@@ -65,6 +65,26 @@ fn invalid_requests_leave_no_output() {
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn inherited_acl_entries_are_refused_before_mining() {
+    let dir = tempdir().unwrap();
+    let acl = Command::new("/bin/chmod")
+        .args(["+a", "everyone allow read,file_inherit"])
+        .arg(dir.path())
+        .status()
+        .unwrap();
+    assert!(acl.success());
+    let result = cli()
+        .args(["--prefix=T", "--out"])
+        .arg(dir.path().join("match.wif"))
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("ACL"));
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
 #[cfg(unix)]
 #[test]
 fn existing_and_dangling_symlinks_are_rejected() {
