@@ -6,8 +6,8 @@ use ripemd::Ripemd160;
 use sha2::{Digest, Sha256};
 use tide_fn_dsa_comm::{codec, mq};
 use tide_fn_dsa_kgen::{
-    DeterministicKeyGenError, FALCON_KEYGEN_SEED_SIZE, FN_DSA_LOGN_512, KeyPairGenerator512,
-    SIGN_KEY_SIZE_512, VRFY_KEY_SIZE_512,
+    FALCON_KEYGEN_SEED_SIZE, FN_DSA_LOGN_512, KeyPairGenerator512, SIGN_KEY_SIZE_512,
+    VRFY_KEY_SIZE_512,
 };
 use tide_fn_dsa_sign::{SigningKey, SigningKey512};
 use zeroize::Zeroizing;
@@ -18,7 +18,7 @@ const WIF_VERSION: u8 = 125;
 const SCHEME: u8 = 7;
 pub type ScriptHash = [u8; 20];
 pub type Address = [u8; ADDRESS_LEN];
-type Public = [u8; VRFY_KEY_SIZE_512];
+pub type Public = [u8; VRFY_KEY_SIZE_512];
 
 pub struct KeyPair {
     // Keep one allocation at a stable address even when transferring a winning pair.
@@ -27,35 +27,28 @@ pub struct KeyPair {
 }
 
 impl KeyPair {
-    pub fn empty() -> Self {
+    fn empty() -> Self {
         Self {
             secret: Zeroizing::new(vec![0; SIGN_KEY_SIZE_512].into_boxed_slice()),
             public: [0; VRFY_KEY_SIZE_512],
         }
     }
 
-    pub fn generate(&mut self, generator: &mut KeyPairGenerator512) -> io::Result<()> {
-        let mut seed = Zeroizing::new([0; FALCON_KEYGEN_SEED_SIZE]);
-        for _ in 0..10_000 {
-            getrandom::fill(&mut *seed).map_err(io::Error::other)?;
-            match generator.keygen_from_seed_pqclean(
-                FN_DSA_LOGN_512,
-                &*seed,
-                &mut self.secret,
-                &mut self.public,
-            ) {
-                Ok(()) => return Ok(()),
-                Err(DeterministicKeyGenError::RejectedSeed) => continue,
-                Err(e) => return Err(io::Error::other(e.to_string())),
-            }
-        }
-        Err(io::Error::other(
-            "Falcon key generation exhausted Core's retry limit",
-        ))
+    /// Core-compatible keygen. The PQClean path retries internally until a
+    /// pair passes, so it only fails on invalid parameters.
+    pub fn from_seed(
+        generator: &mut KeyPairGenerator512,
+        seed: &[u8; FALCON_KEYGEN_SEED_SIZE],
+    ) -> io::Result<Self> {
+        let mut pair = Self::empty();
+        generator
+            .keygen_from_seed_pqclean(FN_DSA_LOGN_512, seed, &mut pair.secret, &mut pair.public)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(pair)
     }
 
-    pub fn script_hash(&self) -> ScriptHash {
-        script_hash(&self.public)
+    pub fn public(&self) -> &Public {
+        &self.public
     }
 
     pub fn verified_wif(&self, expected: &Address) -> io::Result<Zeroizing<Vec<u8>>> {
@@ -129,7 +122,7 @@ fn check_ntru_equation(secret: &[u8]) -> Option<()> {
     (d[0] == 12289 && d[1..].iter().all(|&x| x == 0)).then_some(())
 }
 
-fn script_hash(public: &Public) -> ScriptHash {
+pub fn script_hash(public: &Public) -> ScriptHash {
     // CPubKey::GetID hashes all 898 bytes, including both the scheme and Falcon headers.
     let sha = Sha256::new()
         .chain_update([SCHEME])
@@ -237,14 +230,17 @@ mod tests {
         let prefixed = hex::decode(f.next().unwrap()).unwrap();
         assert_eq!(prefixed[0], SCHEME);
         pair.public.copy_from_slice(&prefixed[1..]);
-        let addr = address(&pair.script_hash());
+        let addr = address(&script_hash(&pair.public));
         assert_eq!(&addr, b"TDGs8UFaMRu5Ru8hBAE7SNkwrtYXBaFXHU");
         assert_eq!(
             pair.verified_wif(&addr).unwrap().as_slice(),
             f.next().unwrap().as_bytes()
         );
         pair.public[20] ^= 1;
-        assert!(pair.verified_wif(&address(&pair.script_hash())).is_err());
+        assert!(
+            pair.verified_wif(&address(&script_hash(&pair.public)))
+                .is_err()
+        );
         pair.public[20] ^= 1;
 
         // F = 0 keeps h = g/f and yields G = 0, which key decoding accepts.

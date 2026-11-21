@@ -1,5 +1,6 @@
 mod output;
 mod pattern;
+mod preview;
 mod protocol;
 
 use std::io::{self, Write};
@@ -13,8 +14,10 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use output::Destination;
 use pattern::{MAX_EXPECTED_ATTEMPTS, Pattern};
-use protocol::{Address, KeyPair};
-use tide_fn_dsa_kgen::KeyPairGenerator512;
+use preview::Preview;
+use protocol::{Address, KeyPair, script_hash};
+use tide_fn_dsa_kgen::{FALCON_KEYGEN_SEED_SIZE, KeyPairGenerator512, VRFY_KEY_SIZE_512};
+use zeroize::Zeroizing;
 
 #[derive(Parser)]
 #[command(
@@ -41,12 +44,21 @@ fn worker(
     stop: &AtomicBool,
     attempts: &AtomicU64,
 ) -> io::Result<Option<(Address, KeyPair)>> {
+    let preview = Preview::new();
     let mut generator = KeyPairGenerator512::default();
-    let mut pair = KeyPair::empty();
+    let mut seed = Zeroizing::new([0; FALCON_KEYGEN_SEED_SIZE]);
+    let mut public = [0; VRFY_KEY_SIZE_512];
     while !stop.load(Relaxed) {
-        pair.generate(&mut generator)?;
+        getrandom::fill(&mut *seed).map_err(io::Error::other)?;
+        preview.public_key(&seed, &mut public);
         attempts.fetch_add(1, Relaxed);
-        if let Some(addr) = pattern.candidate(&pair.script_hash()) {
+        let Some(addr) = pattern.candidate(&script_hash(&public)) else {
+            continue;
+        };
+        // Only matches pay for the exact keygen. If NTRU solving failed for the
+        // previewed pair, Core's key for this seed is a later pair: drop it.
+        let pair = KeyPair::from_seed(&mut generator, &seed)?;
+        if pair.public() == &public {
             return Ok(Some((addr, pair)));
         }
     }
