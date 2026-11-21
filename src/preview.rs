@@ -186,25 +186,29 @@ impl Drop for Stream {
     }
 }
 
-/// Falcon's constant-time mkgauss for N = 512: the sum of two CDT samples.
+/// Falcon's mkgauss for N = 512: the sum of two CDT samples.
 fn mkgauss(stream: &mut Stream) -> i32 {
     let mut val = 0;
     for _ in 0..1 << (10 - LOGN) {
-        let mut r = stream.next_u64();
-        let neg = (r >> 63) as u32;
-        r &= !(1u64 << 63);
-        let mut f = (r.wrapping_sub(GAUSS[0]) >> 63) as u32;
-        let mut v = 0u32;
-        r = stream.next_u64() & !(1u64 << 63);
-        for (k, &bound) in GAUSS.iter().enumerate().skip(1) {
-            let t = ((r.wrapping_sub(bound) >> 63) ^ 1) as u32;
-            v |= (k as u32) & (!(t & (f ^ 1))).wrapping_add(1);
-            f |= t;
-        }
-        v = (v ^ (!neg).wrapping_add(1)).wrapping_add(neg);
-        val += v as i32;
+        let r0 = stream.next_u64();
+        val += cdt(r0, stream.next_u64());
     }
     val
+}
+
+/// One signed CDT sample. Falcon scans the table for the first entry at or
+/// below r1 and stops updating there. GAUSS[1..] strictly decreases, so that
+/// index is one plus the number of entries above r1: a branch-free count the
+/// compiler can vectorize. r0 supplies the sign and the zero test.
+fn cdt(r0: u64, r1: u64) -> i32 {
+    const LOW63: u64 = !(1 << 63);
+    let neg = (r0 >> 63) as i32;
+    let nonzero = ((r0 & LOW63).wrapping_sub(GAUSS[0]) >> 63) ^ 1;
+    let r1 = r1 & LOW63;
+    // For 63-bit values, the top bit of r1 - g is set exactly when r1 < g.
+    let above: u64 = GAUSS[1..].iter().map(|&g| r1.wrapping_sub(g) >> 63).sum();
+    let v = ((1 + above) & nonzero.wrapping_neg()) as i32;
+    (v ^ -neg) + neg
 }
 
 /// Falcon's poly_small_mkgauss: resample the last coefficient until the sum is
@@ -234,6 +238,41 @@ mod tests {
     use super::*;
     use tide_fn_dsa_comm::shake::SHAKE256;
     use tide_fn_dsa_kgen::{KeyPairGenerator512, SIGN_KEY_SIZE_512};
+
+    /// Falcon's scan, as written in Core and tide-fn-dsa.
+    fn reference_cdt(r0: u64, r1: u64) -> i32 {
+        let neg = (r0 >> 63) as u32;
+        let mut f = ((r0 & !(1u64 << 63)).wrapping_sub(GAUSS[0]) >> 63) as u32;
+        let r = r1 & !(1u64 << 63);
+        let mut v = 0u32;
+        for (k, &bound) in GAUSS.iter().enumerate().skip(1) {
+            let t = ((r.wrapping_sub(bound) >> 63) ^ 1) as u32;
+            v |= (k as u32) & (!(t & (f ^ 1))).wrapping_add(1);
+            f |= t;
+        }
+        (v ^ (!neg).wrapping_add(1)).wrapping_add(neg) as i32
+    }
+
+    #[test]
+    fn counting_cdt_matches_falcons_scan() {
+        // Every table boundary, with and without the sign and top bits.
+        let mut values: Vec<u64> = GAUSS
+            .iter()
+            .flat_map(|&g| [g.wrapping_sub(1), g, g + 1])
+            .chain([0, u64::MAX >> 1, u64::MAX])
+            .collect();
+        values.extend(values.clone().iter().map(|v| v | 1 << 63));
+        for &r0 in &values {
+            for &r1 in &values {
+                assert_eq!(cdt(r0, r1), reference_cdt(r0, r1), "{r0:#x} {r1:#x}");
+            }
+        }
+        let mut stream = Stream::new(&[7; FALCON_KEYGEN_SEED_SIZE]);
+        for _ in 0..200_000 {
+            let (r0, r1) = (stream.next_u64(), stream.next_u64());
+            assert_eq!(cdt(r0, r1), reference_cdt(r0, r1));
+        }
+    }
 
     #[test]
     fn lanes_match_the_backend_shake256_stream() {
