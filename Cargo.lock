@@ -290,6 +290,7 @@ dependencies = [
  "ripemd",
  "sha2",
  "tempfile",
+ "tide-fn-dsa-comm",
  "tide-fn-dsa-kgen",
  "tide-fn-dsa-sign",
  "windows-sys",
