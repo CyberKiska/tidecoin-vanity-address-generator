@@ -11,8 +11,16 @@ pub struct Destination<'a> {
 
 impl<'a> Destination<'a> {
     pub fn check(path: &'a Path) -> io::Result<Self> {
-        if path.file_name().is_none() {
-            return Err(io::Error::other("--out must name a new file"));
+        let ends_in_separator = path
+            .as_os_str()
+            .as_encoded_bytes()
+            .last()
+            .is_some_and(|&b| std::path::is_separator(char::from(b)));
+        if ends_in_separator || path.file_name().is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--out must name a new file",
+            ));
         }
         match fs::symlink_metadata(path) {
             Ok(_) => {
@@ -44,8 +52,23 @@ impl<'a> Destination<'a> {
         if let Err(tempfile::PersistError { error, file }) = file.persist_noclobber(self.path) {
             // Never discard a mined key: leave the synced staging file in place.
             let kept = match file.keep() {
-                Ok((_, path)) => format!("the key file was kept at {}", path.display()),
-                Err(e) => format!("keeping the staged key file also failed: {}", e.error),
+                Ok((_, path)) => {
+                    let kept = format!("the key file was kept at {}", path.display());
+                    #[cfg(unix)]
+                    let kept = match sync_directory(self.parent) {
+                        Ok(()) => kept,
+                        Err(e) => format!("{kept}; directory sync failed: {e}"),
+                    };
+                    kept
+                }
+                Err(tempfile::PersistError { error, mut file }) => {
+                    // Keep the record even if the OS cannot clear its temporary attributes.
+                    file.disable_cleanup(true);
+                    format!(
+                        "the staged key file remains at {}, but marking it permanent failed: {error}",
+                        file.path().display()
+                    )
+                }
             };
             return Err(io::Error::new(
                 error.kind(),
@@ -53,22 +76,40 @@ impl<'a> Destination<'a> {
             ));
         }
         #[cfg(unix)]
-        fs::File::open(self.parent)
-            .and_then(|dir| dir.sync_all())
-            .map_err(|e| {
-                io::Error::other(format!(
-                    "key file was published, directory sync failed: {e}"
-                ))
-            })?;
+        sync_directory(self.parent).map_err(|e| {
+            io::Error::other(format!(
+                "key file was published, directory sync failed: {e}"
+            ))
+        })?;
         Ok(())
     }
 }
 
+fn staging_file() -> tempfile::Builder<'static, 'static> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".tdc-vanity-").suffix(".wif");
+    builder
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
 #[cfg(unix)]
 fn private_temp(parent: &Path) -> io::Result<NamedTempFile> {
-    use std::os::unix::fs::PermissionsExt;
-    let file = NamedTempFile::new_in(parent)?; // 0600 at creation, subject to umask
-    if file.as_file().metadata()?.permissions().mode() & 0o077 != 0 {
+    use std::os::unix::fs::MetadataExt;
+    let file = staging_file().tempfile_in(parent)?; // 0600 at creation, subject to umask
+    let metadata = file.as_file().metadata()?;
+    // SAFETY: geteuid takes no arguments and returns the process's effective user ID.
+    let uid = unsafe { libc::geteuid() };
+    if i64::from(metadata.uid()) != i64::from(uid) || metadata.mode() & 0o400 == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "new key files must be readable by the invoking owner; check the output directory and umask",
+        ));
+    }
+    if metadata.mode() & 0o077 != 0 {
         return Err(io::Error::other(
             "the output volume cannot create an owner-only file",
         ));
@@ -95,10 +136,11 @@ fn has_acl_entries(file: &fs::File) -> io::Result<bool> {
     unsafe extern "C" {
         fn acl_get_fd_np(fd: c_int, ty: c_int) -> *mut c_void;
         fn acl_get_entry(acl: *mut c_void, id: c_int, entry: *mut *mut c_void) -> c_int;
+        fn acl_valid(acl: *mut c_void) -> c_int;
         fn acl_free(obj: *mut c_void) -> c_int;
     }
     // SAFETY: the descriptor stays open for the call. The returned ACL is only
-    // read by acl_get_entry and then freed exactly once.
+    // inspected via the ACL API and then freed exactly once.
     unsafe {
         let acl = acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED);
         if acl.is_null() {
@@ -111,9 +153,21 @@ fn has_acl_entries(file: &fs::File) -> io::Result<bool> {
             };
         }
         let mut entry = std::ptr::null_mut();
-        let found = acl_get_entry(acl, ACL_FIRST_ENTRY, &mut entry) == 0;
+        let result = if acl_valid(acl) != 0 {
+            Err(io::Error::last_os_error())
+        } else if acl_get_entry(acl, ACL_FIRST_ENTRY, &mut entry) == 0 {
+            Ok(true)
+        } else {
+            let error = io::Error::last_os_error();
+            // With a validated ACL, EINVAL for ACL_FIRST_ENTRY means it is empty.
+            if error.raw_os_error() == Some(libc::EINVAL) {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        };
         acl_free(acl);
-        Ok(found)
+        result
     }
 }
 
@@ -139,7 +193,7 @@ fn private_temp(parent: &Path) -> io::Result<NamedTempFile> {
 
     // A protected DACL grants full control to the file owner. A shared parent
     // cannot add inherited read ACEs to this file.
-    let temp = tempfile::Builder::new().make_in(parent, |path| {
+    let temp = staging_file().make_in(parent, |path| {
         let path = std::path::absolute(path)?;
         let mut name: Vec<u16> = path.as_os_str().encode_wide().collect();
         if name.contains(&0) {
@@ -217,24 +271,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("address.wif");
         let dest = Destination::check(&path).unwrap();
-        std::thread::scope(|s| {
-            let a = s.spawn(|| dest.save(b"first", b"k1"));
-            let b = s.spawn(|| dest.save(b"second", b"k2"));
-            let results = [a.join().unwrap(), b.join().unwrap()];
-            assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
-            let err = results.into_iter().find_map(Result::err).unwrap();
-            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
-            assert!(err.to_string().contains("kept at"), "{err}");
+        let (winner, loser, error) = std::thread::scope(|s| {
+            let a = s.spawn(|| dest.save(b"first", b"test-wif-first"));
+            let b = s.spawn(|| dest.save(b"second", b"test-wif-second"));
+            let first = b"first:test-wif-first\n".as_slice();
+            let second = b"second:test-wif-second\n".as_slice();
+            match (a.join().unwrap(), b.join().unwrap()) {
+                (Ok(()), Err(e)) => (first, second, e),
+                (Err(e), Ok(())) => (second, first, e),
+                results => panic!("expected one successful publication, got {results:?}"),
+            }
         });
-        assert!(matches!(
-            fs::read(path).unwrap().as_slice(),
-            b"first:k1\n" | b"second:k2\n"
-        ));
-        let mut records: Vec<_> = fs::read_dir(dir.path())
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).unwrap(), winner);
+        let mut recovery = fs::read_dir(dir.path())
             .unwrap()
-            .map(|e| fs::read(e.unwrap().path()).unwrap())
-            .collect();
-        records.sort();
-        assert_eq!(records, [b"first:k1\n".to_vec(), b"second:k2\n".to_vec()]);
+            .map(|e| e.unwrap().path())
+            .filter(|entry| entry != &path);
+        let kept = recovery.next().expect("losing publisher left no key file");
+        assert!(recovery.next().is_none());
+        let name = kept.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with(".tdc-vanity-"));
+        assert!(name.ends_with(".wif"));
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains(&format!("was kept at {}", kept.display())));
+        assert!(!diagnostic.contains("test-wif-"));
+        assert_eq!(fs::read(&kept).unwrap(), loser);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&kept).unwrap().permissions().mode();
+            assert_eq!(mode & 0o477, 0o400);
+        }
     }
 }

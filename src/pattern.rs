@@ -3,8 +3,8 @@ use std::ops::RangeInclusive;
 
 const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
-/// 2^64 keypairs is beyond any hardware. A pattern that no checksummed address
-/// matches fixes so many characters that its estimate is far above this too.
+/// Refuse patterns whose estimated address trials per match exceed this limit.
+/// A pattern that no checksummed address matches has a much higher estimate.
 pub const MAX_EXPECTED_ATTEMPTS: f64 = 18_446_744_073_709_551_616.0;
 
 pub struct Pattern {
@@ -58,7 +58,7 @@ impl Pattern {
         })
     }
 
-    /// Expected keypairs per match. The prefix odds are the width of its
+    /// Estimated address trials per match. The prefix odds are the width of its
     /// script-hash interval. Trailing digits carry the checksum, so each free
     /// suffix digit is close to uniform.
     pub fn expected_attempts(&self) -> f64 {

@@ -43,7 +43,7 @@ struct Args {
 fn worker(
     pattern: &Pattern,
     stop: &AtomicBool,
-    attempts: &AtomicU64,
+    previews: &AtomicU64,
 ) -> io::Result<Option<(Address, KeyPair)>> {
     let mut preview = Preview::new();
     let mut fresh = |seed: &mut Seed| getrandom::fill(seed).map_err(io::Error::other);
@@ -52,7 +52,7 @@ fn worker(
     let mut public = [0; VRFY_KEY_SIZE_512];
     while !stop.load(Relaxed) {
         preview.next(&mut fresh, &mut seed, &mut public)?;
-        attempts.fetch_add(1, Relaxed);
+        previews.fetch_add(1, Relaxed);
         let Some(addr) = pattern.candidate(&script_hash(&public)) else {
             continue;
         };
@@ -68,16 +68,16 @@ fn worker(
 
 fn search(pattern: &Pattern, workers: usize) -> io::Result<(Address, KeyPair)> {
     let stop = AtomicBool::new(false);
-    let attempts = AtomicU64::new(0);
+    let previews = AtomicU64::new(0);
     let start = Instant::now();
     let expected = pattern.expected_attempts();
     let _ = writeln!(
         io::stderr().lock(),
-        "Search workers: {workers}, about {expected:.3e} keypairs per match"
+        "Search workers: {workers}, estimated address trials per match: {expected:.3e}"
     );
     let result = thread::scope(|scope| {
         let (tx, rx) = mpsc::channel();
-        let (stop, attempts) = (&stop, &attempts);
+        let (stop, previews) = (&stop, &previews);
         for _ in 0..workers {
             if stop.load(Relaxed) {
                 break;
@@ -85,7 +85,7 @@ fn search(pattern: &Pattern, workers: usize) -> io::Result<(Address, KeyPair)> {
             let tx = tx.clone();
             let spawned = thread::Builder::new().spawn_scoped(scope, move || {
                 // A failed worker must also wake the coordinator and cancel its peers.
-                let result = std::panic::catch_unwind(|| worker(pattern, stop, attempts))
+                let result = std::panic::catch_unwind(|| worker(pattern, stop, previews))
                     .unwrap_or_else(|_| Err(io::Error::other("search worker panicked")));
                 let outcome = match result {
                     Ok(Some(hit)) => Ok(hit),
@@ -108,16 +108,16 @@ fn search(pattern: &Pattern, workers: usize) -> io::Result<(Address, KeyPair)> {
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(io::Error::other("all workers exited"));
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => report(attempts, start, Some(expected)),
+                Err(mpsc::RecvTimeoutError::Timeout) => report(previews, start, Some(expected)),
             }
         }
     });
-    report(&attempts, start, None);
+    report(&previews, start, None);
     result
 }
 
-fn report(attempts: &AtomicU64, start: Instant, expected: Option<f64>) {
-    let n = attempts.load(Relaxed);
+fn report(previews: &AtomicU64, start: Instant, expected: Option<f64>) {
+    let n = previews.load(Relaxed);
     let rate = n as f64 / start.elapsed().as_secs_f64();
     let eta = expected.map_or(String::new(), |e| {
         // The search is memoryless: the average wait never shrinks.
@@ -135,7 +135,7 @@ fn report(attempts: &AtomicU64, start: Instant, expected: Option<f64>) {
     });
     let _ = writeln!(
         io::stderr().lock(),
-        "{n} keypairs checked, {rate:.1}/s{eta}"
+        "{n} candidates previewed, {rate:.1} previews/s{eta}"
     );
 }
 
@@ -146,7 +146,9 @@ fn run(args: Args) -> io::Result<()> {
     if expected > MAX_EXPECTED_ATTEMPTS {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("pattern needs about {expected:.1e} keypairs per match; the limit is 2^64"),
+            format!(
+                "pattern needs an estimated {expected:.1e} address trials per match, exceeding the 2^64 work limit"
+            ),
         ));
     }
     let dest = Destination::check(&args.out)?;

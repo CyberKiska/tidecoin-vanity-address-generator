@@ -297,6 +297,7 @@ dependencies = [
  "getrandom",
  "hex",
  "keccak",
+ "libc",
  "ripemd",
  "sha2",
  "tempfile",

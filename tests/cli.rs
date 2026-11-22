@@ -26,8 +26,12 @@ fn first_match_is_private_recoverable_and_never_overwritten() {
     let record = fs::read_to_string(&dest).unwrap();
     let (address, wif) = record.trim_end().split_once(':').unwrap();
     assert_eq!(record.lines().count(), 1);
-    assert_eq!(String::from_utf8(first.stdout).unwrap().trim_end(), address);
-    assert!(!String::from_utf8(first.stderr).unwrap().contains(wif));
+    assert!(first.stdout == format!("{address}\n").as_bytes());
+    let stderr = String::from_utf8(first.stderr).unwrap();
+    assert!(!stderr.contains(wif));
+    assert!(stderr.contains("estimated address trials per match"));
+    assert!(stderr.contains("candidates previewed"));
+    assert!(stderr.contains("previews/s"));
     assert!(address.starts_with('T'));
     let mut decoded = [0; 2184];
     assert_eq!(
@@ -41,11 +45,64 @@ fn first_match_is_private_recoverable_and_never_overwritten() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(fs::metadata(&dest).unwrap().permissions().mode() & 0o077, 0);
+        let mode = fs::metadata(&dest).unwrap().permissions().mode();
+        assert_eq!(mode & 0o477, 0o400);
     }
     assert!(!run().status.success());
     assert!(fs::read(&dest).unwrap() == record.as_bytes());
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn umask_removing_owner_read_is_refused_before_mining() {
+    let dir = tempdir().unwrap();
+    let result = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "umask 0777 && exec \"$@\"",
+            "sh",
+            env!("CARGO_BIN_EXE_tdc-vanity"),
+            "--prefix=T",
+            "--out",
+        ])
+        .arg(dir.path().join("match.wif"))
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("readable by the invoking owner"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("umask"), "{stderr}");
+    assert!(!stderr.contains("Search workers"), "{stderr}");
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn trailing_directory_separators_are_refused_before_mining() {
+    let dir = tempdir().unwrap();
+    #[cfg(windows)]
+    let separators = ["/", "\\"];
+    #[cfg(not(windows))]
+    let separators = ["/"];
+    for separator in separators {
+        let mut dest = dir.path().join("missing.wif").into_os_string();
+        dest.push(separator);
+        let result = cli()
+            .args(["--prefix=T", "--out"])
+            .arg(dest)
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(result.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains("--out must name a new file"), "{stderr}");
+        assert!(!stderr.contains("Search workers"), "{stderr}");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 }
 
 #[test]
@@ -97,7 +154,9 @@ fn infeasible_patterns_are_refused_before_mining() {
         .output()
         .unwrap();
     assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("keypairs per match"));
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("address trials per match"), "{stderr}");
+    assert!(stderr.contains("2^64 work limit"), "{stderr}");
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 
