@@ -29,11 +29,11 @@ pub type State2 = [[u64; 2]; 25];
 
 /// Whether `permute_both` handles both states in one pass (ARMv8 SHA3).
 pub fn two_way_available() -> bool {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "arm-sha3"))]
     {
         std::arch::is_aarch64_feature_detected!("sha3")
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", feature = "arm-sha3")))]
     {
         false
     }
@@ -41,7 +41,7 @@ pub fn two_way_available() -> bool {
 
 /// Permutes both states, in one pass when `two_way_available()`.
 pub fn permute_both(state: &mut State2) {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "arm-sha3"))]
     if two_way_available() {
         // SAFETY: two_way_available() just confirmed FEAT_SHA3.
         unsafe { f1600x2_armv8_sha3(state) };
@@ -61,7 +61,7 @@ pub fn permute_one(state: &mut State2, slot: usize) {
     lanes.zeroize();
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "arm-sha3"))]
 const RC: [u64; 24] = [
     0x0000000000000001,
     0x0000000000008082,
@@ -91,7 +91,7 @@ const RC: [u64; 24] = [
 
 /// # Safety
 /// The CPU must implement FEAT_SHA3.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "arm-sha3"))]
 #[target_feature(enable = "sha3")]
 unsafe fn f1600x2_armv8_sha3(state: &mut State2) {
     // SAFETY: x0 points at 25 * 16 readable and writable bytes and is restored
@@ -216,7 +216,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn both_states_match_the_scalar_permutation() {
+    fn both_states_match_two_one_state_permutations() {
         let mut first: [u64; 25] =
             std::array::from_fn(|i| (i as u64).wrapping_mul(0x9E3779B97F4A7C15));
         let mut second: [u64; 25] = std::array::from_fn(|i| !(i as u64) << 7 ^ 0xA5A5);
@@ -236,5 +236,10 @@ mod tests {
         permute_one(&mut both, 1);
         keccak::f1600(&mut second);
         assert_eq!(both, std::array::from_fn(|i| [first[i], second[i]]));
+        if two_way_available() {
+            println!("PASS Keccak: ARMv8 SHA3 two-state and one-state permutations");
+        } else {
+            println!("PASS Keccak: portable one-state permutations and two-state fallback");
+        }
     }
 }

@@ -253,5 +253,12 @@ mod tests {
             .unwrap();
         assert_eq!(derived, pair.public);
         assert!(pair.verified_wif(&addr).is_err());
+
+        #[cfg(target_arch = "x86_64")]
+        let avx2 = tide_fn_dsa_comm::has_avx2();
+        #[cfg(not(target_arch = "x86_64"))]
+        let avx2 = false;
+        let decoder = if avx2 { "AVX2" } else { "portable" };
+        println!("PASS Falcon WIF validation: {decoder} key decoder");
     }
 }
