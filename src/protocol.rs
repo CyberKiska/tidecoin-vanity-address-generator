@@ -34,8 +34,9 @@ impl KeyPair {
         }
     }
 
-    /// Core-compatible keygen. The PQClean path retries internally until a
-    /// pair passes, so it only fails on invalid parameters.
+    /// Full Rust keygen using the PQClean sampling path, which retries internally
+    /// until a pair passes. Core's different floating-point norm summation order
+    /// can affect pair acceptance near the bound.
     pub fn from_seed(
         generator: &mut KeyPairGenerator512,
         seed: &[u8; FALCON_KEYGEN_SEED_SIZE],

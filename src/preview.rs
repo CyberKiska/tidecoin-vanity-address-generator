@@ -1,13 +1,12 @@
-//! The public key that Core-compatible Falcon-512 keygen derives from a seed,
-//! computed without solving the NTRU equation.
+//! Preview a Falcon-512 public key from a seed without solving the NTRU equation.
 //!
 //! PQClean keygen samples (f, g) from SHAKE256(seed) until a pair passes the
 //! coefficient, norm, orthogonalized-norm and invertibility checks, computes
 //! h = g/f mod q, and only then solves for (F, G). The address depends on h
 //! alone, while the solver dominates keygen time. This module repeats the
 //! sampling byte for byte and stops at h. If the solver then fails for that
-//! pair, Core continues with a later pair, so a match must be regenerated with
-//! the exact keygen and its public key compared before use.
+//! pair, full keygen continues with a later pair. Regenerate a match with the
+//! full Rust generator and compare the public keys before using it.
 //!
 //! Keccak dominates the remaining work, so two seeds are previewed side by
 //! side. With ARMv8 SHA3, every permutation advances both of their streams.
@@ -187,8 +186,9 @@ impl<L: Lanes> Pipeline<L> {
 
     /// PQClean requires ||q (adj f, adj g) / (f adj f + g adj g)||^2 < 1.17^2 q.
     /// By Parseval that squared norm equals q^2 / N times the sum, over the N
-    /// roots of x^N + 1, of 1 / (|f|^2 + |g|^2). Rounding can differ from Core's
-    /// FFT only at the bound, where the exact regeneration rejects the pair.
+    /// roots of x^N + 1, of 1 / (|f|^2 + |g|^2). Rounding differences can affect
+    /// which pair passes near the bound. The worker discards a match if the
+    /// full Rust generator returns a different public key.
     fn orthogonal_norm_ok(&self, f: &[i8; N], g: &[i8; N]) -> bool {
         let mut values = Zeroizing::new([[0.0; N]; 4]);
         let [f_re, f_im, g_re, g_im] = &mut *values;
