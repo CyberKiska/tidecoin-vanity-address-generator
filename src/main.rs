@@ -44,9 +44,9 @@ fn worker(
     pattern: &Pattern,
     stop: &AtomicBool,
     previews: &AtomicU64,
+    mut fresh: impl FnMut(&mut Seed) -> io::Result<()>,
 ) -> io::Result<Option<(Address, KeyPair)>> {
     let mut preview = Preview::new();
-    let mut fresh = |seed: &mut Seed| getrandom::fill(seed).map_err(io::Error::other);
     let mut generator = KeyPairGenerator512::default();
     let mut seed = Zeroizing::new([0; FALCON_KEYGEN_SEED_SIZE]);
     let mut public = [0; VRFY_KEY_SIZE_512];
@@ -56,8 +56,8 @@ fn worker(
         let Some(addr) = pattern.candidate(&script_hash(&public)) else {
             continue;
         };
-        // Only matches pay for the exact keygen. If NTRU solving failed for the
-        // previewed pair, Core's key for this seed is a later pair: drop it.
+        // Only matches pay for full keygen. If it retries past the previewed
+        // pair, its address can change, so discard the match.
         let pair = KeyPair::from_seed(&mut generator, &seed)?;
         if pair.public() == &public {
             return Ok(Some((addr, pair)));
@@ -85,8 +85,12 @@ fn search(pattern: &Pattern, workers: usize) -> io::Result<(Address, KeyPair)> {
             let tx = tx.clone();
             let spawned = thread::Builder::new().spawn_scoped(scope, move || {
                 // A failed worker must also wake the coordinator and cancel its peers.
-                let result = std::panic::catch_unwind(|| worker(pattern, stop, previews))
-                    .unwrap_or_else(|_| Err(io::Error::other("search worker panicked")));
+                let result = std::panic::catch_unwind(|| {
+                    worker(pattern, stop, previews, |seed| {
+                        getrandom::fill(seed).map_err(io::Error::other)
+                    })
+                })
+                .unwrap_or_else(|_| Err(io::Error::other("search worker panicked")));
                 let outcome = match result {
                     Ok(Some(hit)) => Ok(hit),
                     Ok(None) => return,
@@ -178,5 +182,70 @@ fn main() -> std::process::ExitCode {
             eprintln!("tdc-vanity: {e}");
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::address;
+    use sha2::{Digest, Sha256, Sha384};
+
+    #[test]
+    fn worker_discards_solver_rejected_preview_and_returns_confirmed_candidate() {
+        // Tidecoin Core rc3, SHA-256 of the raw public key before and after solving.
+        let rejected_seed: Seed = Sha384::digest(53_u64.to_le_bytes()).into();
+        let mut previewed_seed = [0; FALCON_KEYGEN_SEED_SIZE];
+        let mut previewed = [0; VRFY_KEY_SIZE_512];
+        Preview::new()
+            .next(
+                &mut |seed| {
+                    *seed = rejected_seed;
+                    Ok(())
+                },
+                &mut previewed_seed,
+                &mut previewed,
+            )
+            .unwrap();
+        assert_eq!(previewed_seed, rejected_seed);
+        assert_eq!(
+            hex::encode(Sha256::digest(previewed)),
+            "a7c6145fec2d63a29e9ead0d4800ef975fa77b64edd04943f0d5b8814dcf50c8"
+        );
+
+        let mut generator = KeyPairGenerator512::default();
+        let retried = KeyPair::from_seed(&mut generator, &rejected_seed).unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(retried.public())),
+            "38d18286c38baadfc7832784782d7ce67e0729400c5593710420a08cad47977d"
+        );
+        let pattern = Pattern::new("T", "").unwrap();
+        let rejected_address = pattern
+            .candidate(&script_hash(&previewed))
+            .expect("the solver-rejected preview must match the pattern");
+
+        // Give both preview slots the rejected seed before offering the winner.
+        // This makes the first result independent of which slot finishes first.
+        let winner_seed = [0; FALCON_KEYGEN_SEED_SIZE];
+        let expected = KeyPair::from_seed(&mut generator, &winner_seed).unwrap();
+        let expected_address = address(&script_hash(expected.public()));
+        let mut seeds = [rejected_seed, rejected_seed, winner_seed, winner_seed].into_iter();
+        let previews = AtomicU64::new(0);
+        let (found_address, found) = worker(&pattern, &AtomicBool::new(false), &previews, |seed| {
+            *seed = seeds
+                .next()
+                .ok_or_else(|| io::Error::other("worker exhausted the test seeds"))?;
+            Ok(())
+        })
+        .unwrap()
+        .expect("worker should return the later confirmed candidate");
+
+        assert_ne!(
+            found_address, rejected_address,
+            "worker kept a rejected preview"
+        );
+        assert_eq!(found_address, expected_address);
+        assert_eq!(found.public(), expected.public());
+        assert!(previews.load(Relaxed) > 1);
     }
 }
