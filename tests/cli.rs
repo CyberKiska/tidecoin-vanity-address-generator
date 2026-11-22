@@ -79,6 +79,7 @@ fn umask_removing_owner_read_is_refused_before_mining() {
     assert!(stderr.contains("umask"), "{stderr}");
     assert!(!stderr.contains("Search workers"), "{stderr}");
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    println!("PASS umask 0777: rejected before mining and no output left behind");
 }
 
 #[test]
@@ -138,8 +139,12 @@ fn inherited_acl_entries_are_refused_before_mining() {
         .output()
         .unwrap();
     assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("ACL"));
+    assert!(result.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("inherit ACL entries"), "{stderr}");
+    assert!(!stderr.contains("Search workers"), "{stderr}");
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    println!("PASS macOS inheritable read ACL: rejected before mining and no output left behind");
 }
 
 #[test]

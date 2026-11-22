@@ -263,12 +263,15 @@ fn private_temp(parent: &Path) -> io::Result<NamedTempFile> {
 }
 
 #[cfg(test)]
+mod file_access_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn a_losing_publisher_keeps_its_record_instead_of_replacing_or_dropping_it() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = file_access_tests::directory();
         let path = dir.path().join("address.wif");
         let dest = Destination::check(&path).unwrap();
         let (winner, loser, error) = std::thread::scope(|s| {
@@ -283,7 +286,6 @@ mod tests {
             }
         });
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(fs::read(&path).unwrap(), winner);
         let mut recovery = fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().path())
@@ -296,12 +298,6 @@ mod tests {
         let diagnostic = error.to_string();
         assert!(diagnostic.contains(&format!("was kept at {}", kept.display())));
         assert!(!diagnostic.contains("test-wif-"));
-        assert_eq!(fs::read(&kept).unwrap(), loser);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&kept).unwrap().permissions().mode();
-            assert_eq!(mode & 0o477, 0o400);
-        }
+        file_access_tests::check_records(dir.path(), [(&path, winner), (&kept, loser)]);
     }
 }
