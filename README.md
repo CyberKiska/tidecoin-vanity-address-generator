@@ -59,10 +59,18 @@ On an eight-core Apple M1 (four performance and four efficiency cores), 15-secon
 ## Verification
 
 ```sh
+cargo fmt --all -- --check
 cargo test --locked
 cargo test --release --locked
 cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked --no-default-features --features portable -- --show-output
 ```
+
+The [native CI workflow](.github/workflows/native-tests.yml) pins Rust 1.100.0 and runs these checks on macOS arm64, Linux x86-64 GNU and Windows x64 MSVC. The default build tests runtime dispatch, including ARMv8 SHA3 Keccak on supported Macs and AVX2 Falcon decoding on supported x86-64 hosts. The portable build disables those implementations and SHA-2 hardware acceleration. Test output reports the Keccak and Falcon paths exercised.
+
+The access tests reopen both files from a publication race. On macOS they also check that an inheritable read ACL causes rejection before mining. On Linux CI uses `setfacl` and `getfacl` to check that the default ACL's inherited read grant is masked on both files. The Unix suite also checks rejection with umask `0777`. On Windows the tests inspect the protected NTFS DACL and its sole `OWNER RIGHTS` full-access entry. The hosted jobs try a second unprivileged identity and report a pass or a skip with the reason. A pass requires that identity to read a control file in the same directory and receive access denied opening both key files.
+
+For local runs, `TDC_TEST_DEFAULT_ACL=1` enables the Linux ACL fixture and `TDC_TEST_SECOND_IDENTITY=1` attempts the Unix second-user check via noninteractive `sudo` as `nobody`.
 
 The export tests verify the complete legacy WIF against Core's public fixture, check a published P2SH script/address vector, and reject a forged secret that decodes but fails the NTRU equation. The seeded key-generation tests compare the raw public and secret key digests with Core's Falcon C implementation for three fixed seeds. The preview test requires agreement with full Rust key generation for those three seeds and for at least 22 of 24 fixed seeds overall. The worker regression uses a Core rc3 fixture whose first and final public keys differ after a solver retry. Both digests are checked, and the worker must discard the matching preview and return the key and address independently derived from a later seed. In a separate run on 2,000 random seeds, the preview agreed on all 2,000 with a reference built from the backend's own internal checks. [Core wallet fixture](https://github.com/tidecoin/tidecoin/blob/ffed4e92e60ff2de30361648a71cba64531f9077/src/test/data/falcon512_legacy_wif.json) · [Core address vectors](https://github.com/tidecoin/tidecoin/blob/ffed4e92e60ff2de30361648a71cba64531f9077/src/test/data/key_io_valid.json)
 
@@ -71,6 +79,8 @@ Further tests compare the counting sampler with Falcon's scan at every table bou
 The locked dependency versions were compared with the advisory ranges in the [RustSec database snapshot](https://github.com/RustSec/advisory-db/tree/f291af9b1cc0d21dfcea1709d6b037963cef262b). None of the published ranges in that snapshot applied.
 
 The wallet integration check uses wallet-enabled `tidecoind` and `tidecoin-cli` from `tidecoin/tidecoin` commit `ffed4e92e60ff2de30361648a71cba64531f9077`. Use a build from that commit or the verified upstream `v1.0.0rc3` release. The harness checks both executables' reported version. It requires Python 3 with RIPEMD-160 support in `hashlib` and permission to bind a local IPv4 loopback RPC port. [Core v1.0.0rc3 release and verification instructions](https://github.com/tidecoin/tidecoin/releases/tag/v1.0.0rc3)
+
+The workflow's manual `wallet` option runs a separate Linux job. It verifies the release checksum manifest against the pinned builder fingerprint, checks the Linux archive against that manifest, and then runs the wallet harness. Routine pull requests run only the native matrix.
 
 ```sh
 cargo build --release --locked

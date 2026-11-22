@@ -1,0 +1,118 @@
+name: Native tests
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      wallet:
+        description: Verify the pinned Tidecoin Core release and run the wallet round trip
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  TDC_RUST: '1.100.0'
+
+concurrency:
+  group: native-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  native:
+    name: Native (${{ matrix.target }})
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: macos-15
+            target: aarch64-apple-darwin
+          - image: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - image: windows-2025
+            target: x86_64-pc-windows-msvc
+    defaults:
+      run:
+        shell: bash
+    env:
+      TDC_TARGET: ${{ matrix.target }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Report and verify native toolchain
+        run: |
+          rustup toolchain install "$TDC_RUST" --profile minimal --component clippy --component rustfmt
+          rustc_path=$(rustup which --toolchain "$TDC_RUST" rustc | tr -d '\r' | tr '\\' /)
+          dirname "$rustc_path" >> "$GITHUB_PATH"
+          version=$(rustup run "$TDC_RUST" rustc -vV | tr -d '\r')
+          printf '%s\n' "$version"
+          rustup run "$TDC_RUST" cargo -V
+          host=$(sed -n 's/^host: //p' <<< "$version")
+          target_libdir=$(rustup run "$TDC_RUST" rustc --print target-libdir --target "$TDC_TARGET" | tr -d '\r' | tr '\\' /)
+          actual_target=$(basename "$(dirname "$target_libdir")")
+          printf 'Rust host: %s\nRust target: %s\n' "$host" "$actual_target"
+          test "$host" = "$TDC_TARGET"
+          test "$actual_target" = "$TDC_TARGET"
+      - name: Install Linux ACL tools if needed
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v setfacl || ! command -v getfacl; then
+            sudo -n apt-get -q update
+            sudo -n apt-get -q install --yes --no-install-recommends acl
+          fi
+      - name: Format
+        run: rustup run "$TDC_RUST" cargo fmt --all -- --check
+      - name: Clippy
+        run: rustup run "$TDC_RUST" cargo clippy --locked --target "$TDC_TARGET" --all-targets -- -D warnings
+      - name: Debug tests
+        env:
+          TDC_TEST_DEFAULT_ACL: ${{ runner.os == 'Linux' && '1' || '' }}
+        run: rustup run "$TDC_RUST" cargo test --locked --target "$TDC_TARGET" -- --show-output
+      - name: Release tests
+        env:
+          TDC_TEST_DEFAULT_ACL: ${{ runner.os == 'Linux' && '1' || '' }}
+          TDC_TEST_SECOND_IDENTITY: ${{ runner.os != 'Windows' && '1' || '' }}
+        run: rustup run "$TDC_RUST" cargo test --release --locked --target "$TDC_TARGET" -- --show-output
+      - name: Windows second-identity access test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./.github/scripts/windows-file-access.ps1
+      - name: Portable tests
+        run: rustup run "$TDC_RUST" cargo test --locked --target "$TDC_TARGET" --no-default-features --features portable -- --show-output
+
+  wallet:
+    name: Tidecoin Core wallet round trip
+    if: github.event_name == 'workflow_dispatch' && inputs.wallet
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      TDC_TARGET: x86_64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build miner for the native target
+        run: |
+          rustup toolchain install "$TDC_RUST" --profile minimal
+          rustc_path=$(rustup which --toolchain "$TDC_RUST" rustc)
+          export PATH="$(dirname "$rustc_path"):$PATH"
+          version=$(rustup run "$TDC_RUST" rustc -vV)
+          printf '%s\n' "$version"
+          host=$(sed -n 's/^host: //p' <<< "$version")
+          target_libdir=$(rustup run "$TDC_RUST" rustc --print target-libdir --target "$TDC_TARGET")
+          actual_target=$(basename "$(dirname "$target_libdir")")
+          printf 'Rust host: %s\nRust target: %s\n' "$host" "$actual_target"
+          test "$host" = "$TDC_TARGET"
+          test "$actual_target" = "$TDC_TARGET"
+          rustup run "$TDC_RUST" cargo build --release --locked --target "$TDC_TARGET"
+      - name: Verify Core release and run wallet harness
+        run: bash .github/scripts/core-wallet.sh "target/$TDC_TARGET/release/tdc-vanity"
