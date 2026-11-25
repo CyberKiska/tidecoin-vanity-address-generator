@@ -19,7 +19,7 @@ Extract the verified archive and see `README.md` for usage, key handling, and Ti
 
 ## Rehearse locally
 
-Install Python 3.12 or later and Rust 1.100.0 using rustup. On macOS select Xcode and have `unzip` available. The Linux builder uses GCC 13, GNU binutils and Ubuntu 24.04 development headers. On Windows use an x64 MSVC developer shell. Use a new, empty output directory. The build uses two fresh source, Cargo home and target directories, then compares the executables byte for byte. It independently packs both results, compares the ZIPs, and unpacks and runs one on its native target.
+Install Python 3.12 or later and Rust 1.100.0 using rustup. The hosted workflow pins Python 3.15.2. ZIP bytes depend on the Python build's zlib, which `build-info.json` records, so use the same Python build to reproduce an archive byte for byte. On macOS select Xcode and have `unzip` available. The Linux builder uses GCC 13, GNU binutils and Ubuntu 24.04 development headers. On Windows use an x64 MSVC developer shell. Use a new, empty output directory. The build uses two fresh source, Cargo home and target directories, then compares the executables byte for byte. It independently packs both results, compares the ZIPs, and unpacks and runs one on its native target.
 
 ```sh
 rustup toolchain install 1.100.0 --profile minimal

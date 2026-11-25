@@ -13,7 +13,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  TDC_PYTHON: '3.12.16'
+  # Every job uses this exact build: ZIP bytes depend on its zlib.
+  TDC_PYTHON: '3.15.2'
 
 jobs:
   prepare:
@@ -56,7 +57,7 @@ jobs:
             target: aarch64-apple-darwin
           - image: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - image: windows-2022
+          - image: windows-2025
             target: x86_64-pc-windows-msvc
     env:
       TDC_TARGET: ${{ matrix.target }}
