@@ -77,7 +77,7 @@ jobs:
         env:
           TDC_TEST_DEFAULT_ACL: ${{ runner.os == 'Linux' && '1' || '' }}
           TDC_TEST_SECOND_IDENTITY: ${{ runner.os != 'Windows' && '1' || '' }}
-        run: rustup run "$TDC_RUST" cargo test --release --locked --target "$TDC_TARGET" -- --show-output
+        run: rustup run "$TDC_RUST" cargo test --release --locked --target "$TDC_TARGET" -- --include-ignored --show-output
       - name: Windows second-identity access test
         if: runner.os == 'Windows'
         shell: pwsh

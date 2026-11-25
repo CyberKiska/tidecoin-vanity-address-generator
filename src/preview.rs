@@ -520,6 +520,59 @@ mod tests {
         }
     }
 
+    /// SHA-256 over `seed || public key` for the first `count` previews, in
+    /// completion order, with seed i = SHA-384(LE64(i)) supplied in request order.
+    fn mapping_digest(preview: &mut Preview, count: usize) -> String {
+        use sha2::{Digest, Sha256, Sha384};
+        let mut next = 0u64;
+        let mut fresh = |seed: &mut Seed| {
+            seed.copy_from_slice(&Sha384::digest(next.to_le_bytes()));
+            next += 1;
+            Ok(())
+        };
+        let (mut seed, mut public) = ([0; FALCON_KEYGEN_SEED_SIZE], [0; VRFY_KEY_SIZE_512]);
+        let mut digest = Sha256::new();
+        for _ in 0..count {
+            preview.next(&mut fresh, &mut seed, &mut public).unwrap();
+            digest.update(seed);
+            digest.update(public);
+        }
+        hex::encode(digest.finalize())
+    }
+
+    #[test]
+    fn preview_mapping_is_unchanged() {
+        // The first 256 records of the anchored 8,192-record run below.
+        for mut preview in [
+            Preview::Shared(Pipeline::new()),
+            Preview::Separate(Pipeline::new()),
+        ] {
+            assert_eq!(
+                mapping_digest(&mut preview, 256),
+                "25bddd84feaabc31a33f886662f99ef334db8e6b73374bb609df8bdb02592d29"
+            );
+        }
+    }
+
+    /// Fixed-work benchmark: `cargo test --release -- --ignored --show-output`.
+    #[test]
+    #[ignore = "release-mode benchmark"]
+    fn preview_mapping_benchmark() {
+        const RECORDS: usize = 8192;
+        let start = std::time::Instant::now();
+        let digest = mapping_digest(&mut Preview::new(), RECORDS);
+        let elapsed = start.elapsed().as_secs_f64();
+        // Measured on the two-slot pipeline at b058549.
+        assert_eq!(
+            digest,
+            "2d5aedb6804ae1aea9a041266889c282c8a83c5f71ad6e66e5949d3b6d544205"
+        );
+        println!(
+            "{RECORDS} previews in {elapsed:.3} s, {:.0} previews/s on one thread",
+            RECORDS as f64 / elapsed
+        );
+    }
+
     #[test]
     fn previews_match_exact_keygen() {
         let mut preview = Preview::new();

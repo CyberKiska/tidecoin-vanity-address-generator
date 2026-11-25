@@ -64,7 +64,10 @@ cargo test --locked
 cargo test --release --locked
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked --no-default-features --features portable -- --show-output
+cargo test --release --locked -- --include-ignored --show-output
 ```
+
+The last command also runs the ignored fixed-work benchmark: 8,192 previews from fixed seeds, checked against a recorded digest, reporting elapsed time and previews/s on one thread. A fast test checks the first 256 of those records on both lane sources.
 
 The [native CI workflow](.github/workflows/native-tests.yml) pins Rust 1.100.0 and runs these checks on macOS arm64, Linux x86-64 GNU and Windows x64 MSVC. The default build tests runtime dispatch, including ARMv8 SHA3 Keccak on supported Macs and AVX2 Falcon decoding on supported x86-64 hosts. The portable build disables those implementations and SHA-2 hardware acceleration. Test output reports the Keccak and Falcon paths exercised.
 
