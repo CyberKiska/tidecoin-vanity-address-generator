@@ -11,12 +11,15 @@ pub struct Destination<'a> {
 
 impl<'a> Destination<'a> {
     pub fn check(path: &'a Path) -> io::Result<Self> {
-        let ends_in_separator = path
-            .as_os_str()
-            .as_encoded_bytes()
-            .last()
-            .is_some_and(|&b| std::path::is_separator(char::from(b)));
-        if ends_in_separator || path.file_name().is_none() {
+        // Path drops a trailing "." and ignores a trailing separator, so check
+        // the last raw component: "absent/." must not resolve to "absent".
+        // Separators are ASCII on every platform, so a byte split is exact.
+        let raw = path.as_os_str().as_encoded_bytes();
+        let last = raw
+            .rsplit(|&b| std::path::is_separator(char::from(b)))
+            .next()
+            .unwrap_or_default();
+        if last.is_empty() || last == b"." || path.file_name().is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "--out must name a new file",

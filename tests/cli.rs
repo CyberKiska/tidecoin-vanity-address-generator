@@ -85,13 +85,14 @@ fn umask_removing_owner_read_is_refused_before_mining() {
 #[test]
 fn trailing_directory_separators_are_refused_before_mining() {
     let dir = tempdir().unwrap();
+    // Path normalization drops a final "." component, leaving "missing.wif".
     #[cfg(windows)]
-    let separators = ["/", "\\"];
+    let suffixes = ["/", "\\", "/.", "//.", "\\.", "\\\\."];
     #[cfg(not(windows))]
-    let separators = ["/"];
-    for separator in separators {
+    let suffixes = ["/", "/.", "//."];
+    for suffix in suffixes {
         let mut dest = dir.path().join("missing.wif").into_os_string();
-        dest.push(separator);
+        dest.push(suffix);
         let result = cli()
             .args(["--prefix=T", "--out"])
             .arg(dest)

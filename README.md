@@ -18,7 +18,7 @@ For a source build on Windows, the executable is `target\release\tdc-vanity.exe`
 | `--prefix=<PREFIX>` | Exact, case-sensitive start of the displayed address, including the initial `T`. |
 | `--postfix=<POSTFIX>` | Exact, case-sensitive end of the address, including its checksum characters. |
 | `--workers=<NUMBER_OF_THREADS>` | Positive integer. Defaults to the logical CPU count available to the process. |
-| `--out=<DESTINATION>` | Required. Saves one line in the historical `address:WIF` format. The path must name a new file and cannot end with a directory separator. |
+| `--out=<DESTINATION>` | Required. Saves one line in the historical `address:WIF` format. The path must name a new file and cannot end with a directory separator or a `.` component. |
 
 Supply at least one pattern. When both are present, the same address must satisfy both. For a quick key-generation or wallet-recovery test, use `--prefix=T`. Before searching, stderr shows the estimated address trials per match. The 2^64 work limit applies to that estimate and also rejects patterns that no checksummed address can match. Progress on stderr reports candidates previewed and previews/s across all workers, with an average time per match at the current rate. After the key file is saved, stdout receives only the public address followed by a newline. Ctrl+C interrupts the search.
 
