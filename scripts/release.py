@@ -187,6 +187,7 @@ def sbom_and_notices(metadata, locked, target, source):
         pending.extend(graph[current])
 
     components = {}
+    licenses = {}
     notices = (source / "THIRD-PARTY-NOTICES.txt").read_text(encoding="utf-8").rstrip()
     notices += f"\n\nCargo dependency notices for {target}\n\n"
     for package_id in sorted(graph, key=lambda key: (packages[key]["name"], packages[key]["version"])):
@@ -212,8 +213,11 @@ def sbom_and_notices(metadata, locked, target, source):
             require(files, f"Missing license text for {stem}")
             notices += f'{stem} — {item["license"] or "See license file"}\n'
             for filename in sorted(files):
-                require((folder / filename).is_file(), f"Missing notice {stem}/{filename}")
-                notices += f"  source/vendor/{stem}/{filename}\n"
+                path = PurePosixPath(filename)
+                require(not path.is_absolute() and ".." not in path.parts and (folder / filename).is_file(),
+                        f"Missing notice {stem}/{filename}")
+                licenses[f"licenses/{stem}/{path}"] = folder / filename
+                notices += f"  licenses/{stem}/{path}\n"
         components[package_id] = component
 
     refs = {key: value["bom-ref"] for key, value in components.items()}
@@ -224,7 +228,7 @@ def sbom_and_notices(metadata, locked, target, source):
             "components": [component for key, component in components.items() if key != root],
             "dependencies": [{"ref": refs[key], "dependsOn": sorted(refs[dep] for dep in deps)}
                              for key, deps in sorted(graph.items(), key=lambda pair: refs[pair[0]])]}
-    return json_bytes(sbom), notices.encode()
+    return json_bytes(sbom), notices.encode(), licenses
 
 
 def compare(first, second, output, label):
@@ -291,16 +295,20 @@ def write_archive(path, assets, executable):
                              compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
 
 
+def check_archive(archive, assets, executable):
+    require(archive.namelist() == sorted(assets), "ZIP contents differ from the allowlist")
+    for item in archive.infolist():
+        expected_mode = stat.S_IFREG | (0o755 if item.filename == executable else 0o644)
+        require(item.date_time == ZIP_DATE and item.create_system == 3
+                and item.external_attr >> 16 == expected_mode, f"ZIP metadata drift: {item.filename}")
+    require(archive.testzip() is None, "ZIP CRC check failed")
+
+
 def smoke_archive(path, assets, executable, version_string, expected_hash, work):
     unpacked = work / "unpacked"
     unpacked.mkdir()
     with zipfile.ZipFile(path) as archive:
-        require(archive.namelist() == sorted(assets), "ZIP contents differ from the allowlist")
-        for item in archive.infolist():
-            expected_mode = stat.S_IFREG | (0o755 if item.filename == executable else 0o644)
-            require(item.date_time == ZIP_DATE and item.create_system == 3
-                    and item.external_attr >> 16 == expected_mode, f"ZIP metadata drift: {item.filename}")
-        require(archive.testzip() is None, "ZIP CRC check failed")
+        check_archive(archive, assets, executable)
         if os.name == "nt":
             archive.extractall(unpacked)
     if os.name != "nt":
@@ -394,9 +402,9 @@ def build(args):
         report["pre_distribution_executable_sha256"] = binary_hash
         graph = json.loads(command(cargo, "metadata", "--format-version", "1", "--locked", "--offline",
                                    "--filter-platform", target, cwd=tree, env=build_env))
-        sbom, notices = sbom_and_notices(graph, locked, target, source)
+        sbom, notices, licenses = sbom_and_notices(graph, locked, target, source)
         executable = f"bin/{binary_name}"
-        assets = {f"source/{name}": source / name for name in names}
+        assets = dict(licenses)
         rust_docs = rustc.parent.parent / "share/doc/rust"
         assets.update({f"rust-notices/{name}": rust_docs / name for name in RUST_NOTICES})
         assets.update({executable: binaries[0], "README.md": source / "README.md", "LICENSE": source / "LICENSE",
@@ -410,6 +418,17 @@ def build(args):
         compare(first, second, output, "ZIP archive")
         smoke_archive(first, assets, executable, release, binary_hash, work)
         shutil.copyfile(first, output / name)
+        if args.source_archive:
+            # Pack each build's copy of the inputs: the tree Cargo actually built from.
+            name = archive_name(release, "source", args.mode)
+            first, second = [location / name for location in builds]
+            for location, archive in zip(builds, (first, second)):
+                write_archive(archive, {f"source/{item}": location / "source" / item for item in names}, None)
+            compare(first, second, output, "source ZIP archive")
+            with zipfile.ZipFile(first) as archive:
+                check_archive(archive, {f"source/{item}": None for item in names}, None)
+            shutil.copyfile(first, output / name)
+            print(f"PASS source archive {name}: {len(names)} files")
 
 
 def checksums(args):
@@ -418,7 +437,8 @@ def checksums(args):
         check_tag()
         require(args.target is None, "A tagged release must contain all native targets")
     targets = [args.target] if args.target else TARGETS
-    expected = {archive_name(release, target, args.mode) for target in targets} | {"dependency-audit.json"}
+    expected = {archive_name(release, target, args.mode) for target in (*targets, "source")}
+    expected.add("dependency-audit.json")
     folder = args.directory.resolve()
     available = {path.name for path in folder.iterdir() if path.is_file() and not path.is_symlink()}
     require(expected == available and len(list(folder.iterdir())) == len(expected),
@@ -443,8 +463,10 @@ def main():
     builder.add_argument("--output", type=Path, required=True)
     builder.add_argument("--mode", choices=("rehearsal", "tag"), default="rehearsal")
     builder.add_argument("--offline", action="store_true", help="use previously cached crates for vendoring")
+    builder.add_argument("--source-archive", action="store_true",
+                         help="also pack the corresponding source of this build")
     naming = sub.add_parser("archive-name")
-    naming.add_argument("--target", choices=TARGETS, required=True)
+    naming.add_argument("--target", choices=(*TARGETS, "source"), required=True)
     naming.add_argument("--mode", choices=("rehearsal", "tag"), required=True)
     manifest = sub.add_parser("checksums")
     manifest.add_argument("--target", choices=TARGETS, help="single-target local rehearsal")

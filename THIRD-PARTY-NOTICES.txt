@@ -26,12 +26,17 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
-The bundled legacy Falcon interoperability vector comes from Tidecoin Core.
-Its MIT notice is included in source/tests/data/COPYING.
+The legacy Falcon interoperability test vector comes from Tidecoin Core. Its
+MIT notice is in tests/data/COPYING of the source tree.
 
 The Rust standard library and its dependencies are covered by the notices in
 rust-notices/COPYRIGHT-library.html and the accompanying license texts.
 
-The complete crates.io sources referenced by Cargo.lock are in source/vendor.
-The notices below point to the license texts for the native release dependency
-graph. Other vendored crates are included for offline Cargo resolution.
+Corresponding source: each release publishes tdc-vanity-vX.Y.Z-source.zip next
+to the binary ZIPs, from the same release page and listed in the same signed
+SHA256SUMS. It holds the project sources, build scripts, Cargo.lock, the
+complete crates.io sources referenced by Cargo.lock under source/vendor, and the
+offline Cargo configuration.
+
+In a binary ZIP, the license texts of the crates in that target's dependency
+graph are copied under licenses/, as listed below.

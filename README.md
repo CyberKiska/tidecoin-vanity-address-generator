@@ -11,7 +11,7 @@ cargo build --release --locked
 ./target/release/tdc-vanity --prefix=TD --postfix=7 --out=match.wif
 ```
 
-For a source build on Windows, the executable is `target\release\tdc-vanity.exe`. When signed release archives are published, choose the ZIP for your OS and architecture and look for the executable under `bin/`. Follow the [release verification instructions](RELEASING.md) before running a downloaded binary. Choose an existing private directory and a new filename for each run.
+For a source build on Windows, the executable is `target\release\tdc-vanity.exe`. When signed release archives are published, choose the ZIP for your OS and architecture and look for the executable under `bin/`. Each release also publishes the corresponding source as `tdc-vanity-vX.Y.Z-source.zip` on the same page. Follow the [release verification instructions](RELEASING.md) before running a downloaded binary. Choose an existing private directory and a new filename for each run.
 
 | Option | Behavior |
 | --- | --- |

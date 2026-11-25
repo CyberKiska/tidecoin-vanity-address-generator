@@ -88,7 +88,12 @@ jobs:
             export DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer
             test "$(xcrun --sdk macosx --show-sdk-version)" = 15.5
           fi
-          python scripts/release.py build --target "$TDC_TARGET" --mode "$TDC_MODE" --output release-out
+          extra=()
+          # Pack the corresponding source once, from the Linux build's inputs.
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            extra=(--source-archive)
+          fi
+          python scripts/release.py build --target "$TDC_TARGET" --mode "$TDC_MODE" --output release-out "${extra[@]}"
       - name: Build and test two native archives on Windows
         if: runner.os == 'Windows'
         shell: pwsh
