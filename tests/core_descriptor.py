@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from decimal import Decimal
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -60,13 +61,13 @@ def stage(results, name):
     results[name] = "PASS"
 
 
-def capture(argv, description, *, data="", timeout=30):
+def capture(argv, description, *, data="", timeout=30, env=None):
     # Core errors (including successful RPC replies with per-item errors) can
     # echo descriptors. Keep both child streams away from the terminal.
     try:
         reply = subprocess.run(
             argv, input=data, text=True, encoding="utf-8",
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout, env=env,
         )
     except subprocess.TimeoutExpired:
         raise CheckFailed(f"{description} timed out") from None
@@ -76,12 +77,23 @@ def capture(argv, description, *, data="", timeout=30):
     return reply.stdout.strip()
 
 
-def core_binary(command, kind, option):
+def core_binary(command, kind, option, root):
     path = shutil.which(command)
     if path is None:
         raise MissingPrerequisite(f"Missing {kind} executable for {CORE_VERSION} ({option})")
     path = str(Path(path).resolve())
-    lines = capture([path, "-version"], f"{kind} version check").splitlines()
+    # Even -version reads the default datadir and, for the daemon, writes
+    # settings.json there. Use a private datadir, and an unwritable HOME so any
+    # remaining access to the default location fails the check.
+    datadir = root / f"probe-{option.lstrip('-')}"
+    datadir.mkdir(mode=0o700)
+    home = root / "probe-home"
+    home.mkdir(mode=0o500, exist_ok=True)
+    probe = [path, "-version", "-noconf", f"-datadir={datadir}"]
+    if kind == "daemon":
+        probe.append("-nosettings")
+    env = dict(os.environ, HOME=str(home))
+    lines = capture(probe, f"{kind} version check", env=env).splitlines()
     if not lines or lines[0] != f"Tidecoin {kind} version {CORE_VERSION}":
         raise MissingPrerequisite(f"{kind} must be from the pinned {CORE_VERSION} build ({option})")
     return path
@@ -307,8 +319,8 @@ def run(options, results):
             output_script = (b"\xa9\x14" + script_hash + b"\x87").hex()
 
         with stage(results, STAGES[1]):
-            daemon = core_binary(options.daemon, "daemon", "--daemon")
-            cli = core_binary(options.cli, "RPC client", "--cli")
+            daemon = core_binary(options.daemon, "daemon", "--daemon", root)
+            cli = core_binary(options.cli, "RPC client", "--cli", root)
 
         with stage(results, STAGES[2]), Node(daemon, cli, root / "main", "main") as node:
             node.start()
