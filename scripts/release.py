@@ -443,6 +443,9 @@ def main():
     builder.add_argument("--output", type=Path, required=True)
     builder.add_argument("--mode", choices=("rehearsal", "tag"), default="rehearsal")
     builder.add_argument("--offline", action="store_true", help="use previously cached crates for vendoring")
+    naming = sub.add_parser("archive-name")
+    naming.add_argument("--target", choices=TARGETS, required=True)
+    naming.add_argument("--mode", choices=("rehearsal", "tag"), required=True)
     manifest = sub.add_parser("checksums")
     manifest.add_argument("--target", choices=TARGETS, help="single-target local rehearsal")
     manifest.add_argument("--directory", type=Path, required=True)
@@ -455,6 +458,8 @@ def main():
             print(RUST)
         elif args.action == "check-tag":
             check_tag()
+        elif args.action == "archive-name":
+            print(archive_name(version(), args.target, args.mode))
         elif args.action == "checksums":
             checksums(args)
         else:

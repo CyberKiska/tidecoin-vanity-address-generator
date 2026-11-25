@@ -17,6 +17,12 @@ env:
   TDC_PYTHON: '3.15.2'
 
 jobs:
+  tests:
+    name: Native test suite
+    uses: ./.github/workflows/native-tests.yml
+    permissions:
+      contents: read
+
   prepare:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -143,11 +149,10 @@ jobs:
 
   wallet:
     needs: [prepare, native]
-    if: needs.prepare.outputs.mode == 'tag'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      TDC_VERSION: ${{ needs.prepare.outputs.version }}
+      TDC_MODE: ${{ needs.prepare.outputs.mode }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -163,14 +168,12 @@ jobs:
       - name: Test wallet recovery with the packaged executable
         shell: bash
         run: |
-          unzip -q "wallet-archive/tdc-vanity-v${TDC_VERSION}-x86_64-unknown-linux-gnu.zip" bin/tdc-vanity -d wallet-archive
+          archive=$(python scripts/release.py archive-name --target x86_64-unknown-linux-gnu --mode "$TDC_MODE")
+          unzip -q "wallet-archive/$archive" bin/tdc-vanity -d wallet-archive
           bash .github/scripts/core-wallet.sh wallet-archive/bin/tdc-vanity
 
   assemble:
-    needs: [prepare, native, advisories, wallet]
-    if: >-
-      ${{ !cancelled() && needs.native.result == 'success' && needs.advisories.result == 'success' &&
-      (needs.wallet.result == 'success' || needs.prepare.outputs.mode == 'rehearsal') }}
+    needs: [tests, prepare, native, advisories, wallet]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:

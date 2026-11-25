@@ -1,7 +1,15 @@
 name: Native tests
 
 on:
+  push:
+    branches: [main]
   pull_request:
+  workflow_call:
+    inputs:
+      wallet:
+        description: Verify the pinned Tidecoin Core release and run the wallet round trip
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       wallet:
@@ -15,9 +23,12 @@ permissions:
 env:
   TDC_RUST: '1.100.0'
 
+# A called workflow sees the caller's github context, so github.workflow
+# separates release calls from direct runs. The native-tests- prefix keeps the
+# group distinct from the caller's, and only direct pull request runs cancel.
 concurrency:
-  group: native-tests-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: native-tests-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.workflow == 'Native tests' && github.event_name == 'pull_request' }}
 
 jobs:
   native:
@@ -87,7 +98,7 @@ jobs:
 
   wallet:
     name: Tidecoin Core wallet round trip
-    if: github.event_name == 'workflow_dispatch' && inputs.wallet
+    if: inputs.wallet
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
