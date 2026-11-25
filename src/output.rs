@@ -127,7 +127,31 @@ fn private_temp(parent: &Path) -> io::Result<NamedTempFile> {
             "new files in the output directory inherit ACL entries; choose a private directory",
         ));
     }
+    // A volume mounted with ownership ignored (noowners, common for external
+    // drives) reports our uid and 0600 but lets every local user read the file.
+    #[cfg(target_os = "macos")]
+    if ignores_ownership(file.as_file())? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the output volume ignores file ownership; choose a private directory on a volume that enforces it",
+        ));
+    }
     Ok(file)
+}
+
+#[cfg(target_os = "macos")]
+fn ignores_ownership(file: &fs::File) -> io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: the descriptor stays open for the call, and fstatfs fully
+    // initializes the buffer when it returns 0.
+    let stats = unsafe {
+        if libc::fstatfs(file.as_raw_fd(), stats.as_mut_ptr()) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        stats.assume_init()
+    };
+    Ok(stats.f_flags & libc::MNT_IGNORE_OWNERSHIP as u32 != 0)
 }
 
 #[cfg(target_os = "macos")]

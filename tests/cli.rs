@@ -148,6 +148,74 @@ fn inherited_acl_entries_are_refused_before_mining() {
     println!("PASS macOS inheritable read ACL: rejected before mining and no output left behind");
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn volumes_ignoring_ownership_are_refused_before_mining() {
+    struct Detach(std::path::PathBuf);
+    impl Drop for Detach {
+        fn drop(&mut self) {
+            let _ = Command::new("/usr/bin/hdiutil")
+                .args(["detach", "-force", "-quiet"])
+                .arg(&self.0)
+                .status();
+        }
+    }
+    let dir = tempdir().unwrap();
+    let image = dir.path().join("noowners.dmg");
+    let mount = dir.path().join("mount");
+    fs::create_dir(&mount).unwrap();
+    let name = format!("tdcvanity-noowners-{}", std::process::id());
+    let created = Command::new("/usr/bin/hdiutil")
+        .args([
+            "create", "-quiet", "-size", "20m", "-fs", "APFS", "-volname", &name,
+        ])
+        .arg(&image)
+        .status()
+        .unwrap();
+    if !created.success() {
+        println!("SKIP macOS noowners volume: hdiutil create failed");
+        return;
+    }
+    let attached = Command::new("/usr/bin/hdiutil")
+        .args([
+            "attach",
+            "-quiet",
+            "-owners",
+            "off",
+            "-nobrowse",
+            "-mountpoint",
+        ])
+        .arg(&mount)
+        .arg(&image)
+        .status()
+        .unwrap();
+    let _detach = Detach(mount.clone());
+    if !attached.success() {
+        println!("SKIP macOS noowners volume: hdiutil attach failed");
+        return;
+    }
+    let result = cli()
+        .args(["--prefix=T", "--out"])
+        .arg(mount.join("match.wif"))
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("ignores file ownership"), "{stderr}");
+    assert!(!stderr.contains("Search workers"), "{stderr}");
+    // The fresh volume may hold system entries such as .fseventsd.
+    for entry in fs::read_dir(&mount).unwrap() {
+        let name = entry.unwrap().file_name();
+        let name = name.to_string_lossy();
+        assert!(
+            name != "match.wif" && !name.starts_with(".tdc-vanity-"),
+            "{name}"
+        );
+    }
+    println!("PASS macOS noowners volume: rejected before mining and no output left behind");
+}
+
 #[test]
 fn infeasible_patterns_are_refused_before_mining() {
     let dir = tempdir().unwrap();
