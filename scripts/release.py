@@ -21,7 +21,11 @@ import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 RUST = "1.100.0"
-TARGETS = ("aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc")
+TARGETS = ("aarch64-apple-darwin", "x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc")
+# The only non-native build: a static musl executable from a glibc host.
+CROSS = {"x86_64-unknown-linux-gnu": "x86_64-unknown-linux-musl"}
+# The musl release in Rust 1.100's self-contained x86_64-unknown-linux-musl libc.a.
+MUSL = "1.2.5"
 SOURCE_FILES = (
     "Cargo.toml", "Cargo.lock", "LICENSE", "README.md", "RELEASING.md",
     "THIRD-PARTY-NOTICES.txt", "scripts/release.py", "scripts/release-audit.sh",
@@ -30,6 +34,7 @@ SOURCE_FILES = (
     "src/main.rs", "src/keccak2.rs", "src/output.rs", "src/output/file_access_tests.rs",
     "src/pattern.rs", "src/preview.rs", "src/protocol.rs", "tests/cli.rs",
     "tests/core_descriptor.py", "tests/data/COPYING", "tests/data/core-legacy-falcon512.txt",
+    f"licenses/musl-{MUSL}/COPYRIGHT",
 )
 RUST_NOTICES = (
     "COPYRIGHT-library.html", "licenses/Apache-2.0.txt", "licenses/BSD-2-Clause.txt",
@@ -108,12 +113,18 @@ def native_tools(target, env):
         flags = [f"-Clinker={driver}", f"-Clink-arg=--ld-path={linker}",
                  "-Clink-arg=-Wl,-no_adhoc_codesign"]
         linker_version = command(linker, "-v", env=env, stderr=subprocess.STDOUT)
-    elif target.endswith("gnu"):
+    elif "linux" in target:
         driver = "/usr/bin/gcc-13"
         linker = "/usr/bin/ld.bfd"
         sdk = command("getconf", "GNU_LIBC_VERSION") + "\n" + command(
             "dpkg-query", "-W", "libc6-dev", "linux-libc-dev")
-        flags = [f"-Clinker={driver}", "-Clinker-features=-lld", "-Clink-arg=-fuse-ld=bfd"]
+        flags = [f"-Clinker={driver}", "-Clink-arg=-fuse-ld=bfd"]
+        if target.endswith("musl"):
+            # Rust's self-contained musl libc and startup files replace the host's.
+            flags.append("-Clink-self-contained=yes")
+            sdk += f"\nmusl {MUSL} (Rust self-contained)"
+        else:
+            flags.insert(1, "-Clinker-features=-lld")
         linker_version = command(linker, "--version", env=env)
     else:
         require(env.get("VSCMD_ARG_TGT_ARCH") == "x64" and env.get("WINDOWSSDKVERSION"),
@@ -189,6 +200,12 @@ def sbom_and_notices(metadata, locked, target, source):
     components = {}
     licenses = {}
     notices = (source / "THIRD-PARTY-NOTICES.txt").read_text(encoding="utf-8").rstrip()
+    if target.endswith("musl"):
+        musl = f"licenses/musl-{MUSL}/COPYRIGHT"
+        licenses[musl] = source / musl
+        notices += (f"\n\nThe Linux executable statically links musl libc {MUSL} and its startup files\n"
+                    f"(MIT; {musl}). Rust also links LLVM libunwind and crtbegin/crtend\n"
+                    "objects (Apache-2.0 WITH LLVM-exception; see rust-notices/licenses).")
     notices += f"\n\nCargo dependency notices for {target}\n\n"
     for package_id in sorted(graph, key=lambda key: (packages[key]["name"], packages[key]["version"])):
         item = packages[package_id]
@@ -220,6 +237,10 @@ def sbom_and_notices(metadata, locked, target, source):
                 notices += f"  licenses/{stem}/{path}\n"
         components[package_id] = component
 
+    if target.endswith("musl"):
+        purl = f"pkg:generic/musl@{MUSL}"
+        components["musl"] = {"type": "library", "name": "musl", "version": MUSL, "bom-ref": purl,
+                              "purl": purl, "licenses": [{"expression": "MIT"}]}
     refs = {key: value["bom-ref"] for key, value in components.items()}
     sbom = {"$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
             "bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1,
@@ -304,7 +325,26 @@ def check_archive(archive, assets, executable):
     require(archive.testzip() is None, "ZIP CRC check failed")
 
 
-def smoke_archive(path, assets, executable, version_string, expected_hash, work):
+def require_static_elf(binary):
+    """Reject an x86-64 ELF that needs a program interpreter or shared libraries."""
+    data = binary.read_bytes()
+    require(data[:6] == b"\x7fELF\x02\x01" and struct.unpack_from("<H", data, 18)[0] == 62,
+            "Expected a little-endian x86-64 ELF executable")
+    phoff, = struct.unpack_from("<Q", data, 32)
+    phentsize, phnum = struct.unpack_from("<2H", data, 54)
+    require(phentsize == 56 and phoff + phnum * 56 <= len(data), "Invalid ELF program headers")
+    for index in range(phnum):
+        kind, _, offset, _, _, size = struct.unpack_from("<2I4Q", data, phoff + index * 56)
+        require(kind != 3, "ELF executable requests a program interpreter (PT_INTERP)")
+        if kind == 2:  # PT_DYNAMIC: static-pie keeps one for self-relocation.
+            require(offset + size <= len(data) and size % 16 == 0, "Invalid ELF dynamic section")
+            tags = [struct.unpack_from("<q", data, at)[0] for at in range(offset, offset + size, 16)]
+            require(1 not in tags[:tags.index(0) if 0 in tags else None],
+                    "ELF executable needs shared libraries (DT_NEEDED)")
+    print("PASS ELF has no PT_INTERP and no DT_NEEDED entries (statically linked)")
+
+
+def smoke_archive(path, assets, executable, target, version_string, expected_hash, work):
     unpacked = work / "unpacked"
     unpacked.mkdir()
     with zipfile.ZipFile(path) as archive:
@@ -315,6 +355,8 @@ def smoke_archive(path, assets, executable, version_string, expected_hash, work)
         subprocess.run(["unzip", "-q", str(path), "-d", str(unpacked)], check=True)
     binary = unpacked / executable
     require(sha256(binary) == expected_hash, "Extracted executable differs from the verified build")
+    if "linux" in target:
+        require_static_elf(binary)
     if sys.platform == "darwin":
         subprocess.run(["codesign", "--verify", "--strict", binary], check=True, timeout=30)
     require(b"--out" in subprocess.check_output([binary, "--help"], timeout=30), "Extracted help failed")
@@ -346,9 +388,13 @@ def build(args):
     env = input_env(rustc)
     rust = command(rustc, "-vV", env=env)
     host = next(line.split(": ", 1)[1] for line in rust.splitlines() if line.startswith("host: "))
-    target = args.target or host
-    require(host == target and target in TARGETS, f"Unsupported non-native build: {host} -> {target}")
+    target = args.target or CROSS.get(host, host)
+    require(target in TARGETS and target in (host, CROSS.get(host)), f"Unsupported build: {host} -> {target}")
     flags, sdk = native_tools(target, env)
+    if target.endswith("musl"):
+        # The notices name this musl release; refuse a toolchain that bundles another.
+        libc = rustc.parent.parent / "lib/rustlib" / target / "lib/self-contained/libc.a"
+        require(f"\0{MUSL}\0".encode() in libc.read_bytes(), f"Rust's bundled libc.a is not musl {MUSL}")
     has_git = (ROOT / ".git").exists()
     report = {"host": host, "target": target, "commit": command("git", "rev-parse", "HEAD", cwd=ROOT)
               if has_git else None, "mode": args.mode, "os": platform.platform(),
@@ -416,7 +462,7 @@ def build(args):
         assets[executable] = binaries[1]
         write_archive(second, assets, executable)
         compare(first, second, output, "ZIP archive")
-        smoke_archive(first, assets, executable, release, binary_hash, work)
+        smoke_archive(first, assets, executable, target, release, binary_hash, work)
         shutil.copyfile(first, output / name)
         if args.source_archive:
             # Pack each build's copy of the inputs: the tree Cargo actually built from.

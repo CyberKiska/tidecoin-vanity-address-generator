@@ -62,7 +62,7 @@ jobs:
           - image: macos-15
             target: aarch64-apple-darwin
           - image: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
           - image: windows-2025
             target: x86_64-pc-windows-msvc
     env:
@@ -79,7 +79,7 @@ jobs:
           python-version: ${{ env.TDC_PYTHON }}
       - name: Install pinned Rust
         shell: bash
-        run: rustup toolchain install "$TDC_RUST" --profile minimal
+        run: rustup toolchain install "$TDC_RUST" --profile minimal --target "$TDC_TARGET"
       - name: Build and test two native archives on Unix
         if: runner.os != 'Windows'
         shell: bash
@@ -167,13 +167,13 @@ jobs:
           python-version: ${{ env.TDC_PYTHON }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: release-input-x86_64-unknown-linux-gnu
+          name: release-input-x86_64-unknown-linux-musl
           path: wallet-archive
           digest-mismatch: error
       - name: Test wallet recovery with the packaged executable
         shell: bash
         run: |
-          archive=$(python scripts/release.py archive-name --target x86_64-unknown-linux-gnu --mode "$TDC_MODE")
+          archive=$(python scripts/release.py archive-name --target x86_64-unknown-linux-musl --mode "$TDC_MODE")
           unzip -q "wallet-archive/$archive" bin/tdc-vanity -d wallet-archive
           bash .github/scripts/core-wallet.sh wallet-archive/bin/tdc-vanity
 

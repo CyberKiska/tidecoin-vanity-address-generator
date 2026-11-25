@@ -11,7 +11,7 @@ cargo build --release --locked
 ./target/release/tdc-vanity --prefix=TD --postfix=7 --out=match.wif
 ```
 
-For a source build on Windows, the executable is `target\release\tdc-vanity.exe`. When signed release archives are published, choose the ZIP for your OS and architecture and look for the executable under `bin/`. Each release also publishes the corresponding source as `tdc-vanity-vX.Y.Z-source.zip` on the same page. Follow the [release verification instructions](RELEASING.md) before running a downloaded binary. Choose an existing private directory and a new filename for each run.
+For a source build on Windows, the executable is `target\release\tdc-vanity.exe`. When signed release archives are published, choose the ZIP for your OS and architecture and look for the executable under `bin/`. The Linux executable is statically linked with musl. Each release also publishes the corresponding source as `tdc-vanity-vX.Y.Z-source.zip` on the same page. Follow the [release verification instructions](RELEASING.md) before running a downloaded binary. Choose an existing private directory and a new filename for each run.
 
 | Option | Behavior |
 | --- | --- |
@@ -69,7 +69,7 @@ cargo test --release --locked -- --include-ignored --show-output
 
 The last command also runs the ignored fixed-work benchmark: 8,192 previews from fixed seeds, checked against a recorded digest, reporting elapsed time and previews/s on one thread. A fast test checks the first 256 of those records on both lane sources.
 
-The [native CI workflow](.github/workflows/native-tests.yml) pins Rust 1.100.0 and runs these checks on macOS arm64, Linux x86-64 GNU and Windows x64 MSVC. The release workflow calls the same suite on the commit it packages. The default build tests runtime dispatch, including ARMv8 SHA3 Keccak on supported Macs and AVX2 Falcon decoding on supported x86-64 hosts. The portable build disables those implementations and SHA-2 hardware acceleration. Test output reports the Keccak and Falcon paths exercised.
+The [native CI workflow](.github/workflows/native-tests.yml) pins Rust 1.100.0 and runs these checks on macOS arm64, Linux x86-64 GNU and Windows x64 MSVC. The Linux job also runs the release tests for the static `x86_64-unknown-linux-musl` release target. The release workflow calls the same suite on the commit it packages. The default build tests runtime dispatch, including ARMv8 SHA3 Keccak on supported Macs and AVX2 Falcon decoding on supported x86-64 hosts. The portable build disables those implementations and SHA-2 hardware acceleration. Test output reports the Keccak and Falcon paths exercised.
 
 The access tests reopen both files from a publication race. On macOS they also check that an inheritable read ACL, and a disk image attached with ownership ignored, cause rejection before mining. On Linux CI uses `setfacl` and `getfacl` to check that the default ACL's inherited read grant is masked on both files. The Unix suite also checks rejection with umask `0777`. On Windows the tests inspect the protected NTFS DACL and its sole `OWNER RIGHTS` full-access entry. The hosted jobs try a second unprivileged identity and report a pass or a skip with the reason. A pass requires that identity to read a control file in the same directory and receive access denied opening both key files.
 

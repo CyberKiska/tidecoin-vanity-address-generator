@@ -34,7 +34,7 @@ jobs:
   native:
     name: Native (${{ matrix.target }})
     runs-on: ${{ matrix.image }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -95,6 +95,13 @@ jobs:
         run: ./.github/scripts/windows-file-access.ps1
       - name: Portable tests
         run: rustup run "$TDC_RUST" cargo test --locked --target "$TDC_TARGET" --no-default-features --features portable -- --show-output
+      - name: Static musl release tests
+        if: runner.os == 'Linux'
+        env:
+          TDC_TEST_DEFAULT_ACL: '1'
+        run: |
+          rustup target add --toolchain "$TDC_RUST" x86_64-unknown-linux-musl
+          rustup run "$TDC_RUST" cargo test --locked --release --target x86_64-unknown-linux-musl -- --show-output
 
   wallet:
     name: Tidecoin Core wallet round trip
