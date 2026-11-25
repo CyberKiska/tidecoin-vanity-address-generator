@@ -15,7 +15,15 @@ cosign verify-blob SHA256SUMS \
 
 After signature verification, compare the SHA-256 of your ZIP against the entry with its exact basename in `SHA256SUMS`. Linux users who downloaded all the assets can run `sha256sum --strict --check SHA256SUMS`. For a single ZIP, calculate its digest with `sha256sum <file>` on Linux, `shasum -a 256 <file>` on macOS, or `Get-FileHash -Algorithm SHA256 <file>` in PowerShell.
 
-Extract the verified archive and see `README.md` for usage, key handling, and Tidecoin wallet recovery. The executable is under `bin/`. The manifest signature authenticates the archived executable bytes. Platform code signing, Apple notarization, and Windows Authenticode are separate distribution steps.
+Extract the verified archive and see `README.md` for usage, key handling, and Tidecoin wallet recovery. The executable is under `bin/`. The manifest signature authenticates the archived executable bytes. Releases are not notarized or Authenticode-signed. The macOS executable carries only an ad-hoc signature.
+
+On macOS, Gatekeeper blocks a quarantined executable from a browser download. Verify the Sigstore bundle and the ZIP's SHA-256 first, exactly as above. Then remove the quarantine attribute from the single extracted executable only:
+
+```sh
+xattr -d com.apple.quarantine bin/tdc-vanity
+```
+
+Do not remove it recursively from a downloads folder, and do not disable Gatekeeper with `spctl --master-disable`. Files fetched with `curl` are not quarantined and need no change.
 
 The Linux executable is statically linked against musl libc and needs no particular glibc version.
 
@@ -43,4 +51,4 @@ Configure a tag ruleset that restricts creation, update and deletion of `v*` tag
 
 Review the build, audit, wallet and native CI results before enabling signing. To authorize keyless signing, configure the `release-signing` GitHub environment with required reviewers, prevent self-review, and restrict it to protected release tags. Set its environment variable `TDC_SIGNING_REPOSITORY` to the exact `OWNER/REPOSITORY` spelling. Set the repository variable `TDC_ENABLE_RELEASE_SIGNING` to `true` only when ready. The signing job receives OIDC permission, downloads the assembled assets for the same run, verifies their hashes, signs the manifest, and verifies the resulting bundle with the expected tag workflow identity. Publication is a separate maintainer action. The workflow provides the assets as workflow artifacts.
 
-Publish the three binary ZIPs, the source ZIP, `dependency-audit.json`, `SHA256SUMS`, and `SHA256SUMS.sigstore.json` from the same reviewed run and on the same release page. The manifest lists the final ZIPs and audit report. Any platform signing or other modification to an executable changes its bytes. Apply such changes after comparing the clean builds, then repackage, repeat the native smoke tests on those final archives, regenerate the manifest, and sign that manifest before publication.
+Publish the three binary ZIPs, the source ZIP, `dependency-audit.json`, `SHA256SUMS`, and `SHA256SUMS.sigstore.json` from the same reviewed run and on the same release page. The manifest lists the final ZIPs and audit report. Any modification to an executable changes its bytes. Apply it after comparing the clean builds, then repackage, repeat the native smoke tests on those final archives, regenerate the manifest, and sign that manifest before publication.
