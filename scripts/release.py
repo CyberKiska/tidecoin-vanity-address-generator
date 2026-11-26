@@ -136,7 +136,12 @@ def native_tools(target, env):
         env.pop("LINK", None)
         env.pop("_LINK_", None)
         flags = [f"-Clinker={linker}", "-Clink-arg=/Brepro", "-Clink-arg=/INCREMENTAL:NO"]
-        linker_version = command(linker, "/?", env=env).splitlines()[0]
+        # The 14.44 link.exe in Visual Studio 2026 exits 1100 after printing its help, so
+        # check the banner instead of the exit status.
+        banner = subprocess.run([linker, "/?"], env=env, capture_output=True, text=True,
+                                encoding="utf-8", errors="replace").stdout.strip()
+        linker_version = banner.splitlines()[0] if banner else ""
+        require("Linker Version" in linker_version, f"Unexpected link.exe banner: {linker_version!r}")
     driver_version = linker_version if driver == linker else command(driver, "--version", env=env)
     report = {"sdk": sdk, "driver": driver, "driver_version": driver_version,
               "driver_sha256": sha256(Path(driver)), "linker": linker,
