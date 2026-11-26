@@ -99,7 +99,10 @@ jobs:
         shell: pwsh
         run: |
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          $vs = & $vswhere -latest -products '*' -version '[17.0,18.0)' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          # windows-2025 now ships Visual Studio 2026, which still carries the 14.44 toolset.
+          # The toolset and SDK checks below are the pin, not the IDE version.
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'No Visual Studio with x64 MSVC tools' }
           Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64 -winsdk=10.0.26100.0 -vcvars_ver=14.44'
           if ($env:WindowsSDKVersion.TrimEnd('\') -ne '10.0.26100.0' -or $env:VCToolsVersion -notlike '14.44.*') {
