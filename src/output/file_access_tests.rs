@@ -110,7 +110,9 @@ mod platform {
                 r#"
                     die "identity did not change\n" if $> == 0 || $> eq shift @ARGV;
                     open(my $control, '<', shift @ARGV) or die "control open: $!\n";
-                    defined(read($control, my $byte, 1)) && length($byte) == 1
+                    # A `my` inside the expression is not visible to length().
+                    my $byte;
+                    defined(read($control, $byte, 1)) && length($byte) == 1
                         or die "control read failed\n";
                     for my $file (@ARGV) {
                         die "key file was readable\n" if open(my $key, '<', $file);
