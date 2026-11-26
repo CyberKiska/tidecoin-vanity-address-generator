@@ -2,7 +2,7 @@
 set -euo pipefail
 
 version=0.19.5
-revision=55e1c3dfbd834237a05bbbf7b50ba3b5be27b662
+revision=b9b8a3c2cb1f2a3c76ab17a551193568c9f8b7a4
 url=https://github.com/RustSec/advisory-db
 if [[ ${1:-} == --version ]]; then
     printf '%s\n' "$version"

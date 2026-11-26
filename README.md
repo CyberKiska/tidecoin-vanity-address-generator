@@ -79,7 +79,7 @@ The export tests verify the complete legacy WIF against Core's public fixture, c
 
 Further tests compare the counting sampler with Falcon's scan at every table boundary and on 200,000 stream values. They also compare the two-state permutation with the scalar one, both lane sources with the backend's SHAKE256 through uneven reads, a full queue and a reseed, and the two pipelines' candidates with each other. They cover matching, difficulty limits, concurrent publication that keeps the losing record, private output including inherited macOS ACLs, and rejection of existing files.
 
-The locked dependency versions were compared with the advisory ranges in the [RustSec database snapshot](https://github.com/RustSec/advisory-db/tree/f291af9b1cc0d21dfcea1709d6b037963cef262b). None of the published ranges in that snapshot applied.
+`scripts/release-audit.sh` checks `Cargo.lock` with cargo-deny 0.19.5 against a pinned [RustSec database revision](https://github.com/RustSec/advisory-db/tree/b9b8a3c2cb1f2a3c76ab17a551193568c9f8b7a4). On 26 November 2026 it reported no advisories for the locked versions. Refresh the pin before each release.
 
 The wallet integration check uses wallet-enabled `tidecoind` and `tidecoin-cli` from `tidecoin/tidecoin` commit `ffed4e92e60ff2de30361648a71cba64531f9077`. Use a build from that commit or the verified upstream `v1.0.0rc3` release. The harness checks both executables' reported version. It requires Python 3 with RIPEMD-160 support in `hashlib` and permission to bind a local IPv4 loopback RPC port. [Core v1.0.0rc3 release and verification instructions](https://github.com/tidecoin/tidecoin/releases/tag/v1.0.0rc3)
 
