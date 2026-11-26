@@ -2,19 +2,31 @@
 name = "tdc-vanity"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+license = "AGPL-3.0-or-later"
 publish = false
 description = "Parallel mainnet Tidecoin P2SH-P2WPKH vanity address generator"
+
+[features]
+default = ["arm-sha3"]
+arm-sha3 = ["keccak/asm"]
+portable = ["tide-fn-dsa-kgen/no_avx2", "tide-fn-dsa-sign/no_avx2", "sha2/force-soft"]
 
 [dependencies]
 bs58 = { version = "0.5.1", default-features = false, features = ["check"] }
 clap = { version = "4.6", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
 getrandom = "0.4"
+keccak = "0.1.6"
 ripemd = "0.1.3"
 sha2 = "0.10.9"
 tempfile = "3.27"
+tide-fn-dsa-comm = "=0.5.0"
 tide-fn-dsa-kgen = "=0.5.0"
 tide-fn-dsa-sign = { version = "=0.5.0", features = ["small_context"] }
 zeroize = "1.9"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_SystemServices"] }

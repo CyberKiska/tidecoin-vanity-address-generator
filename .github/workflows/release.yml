@@ -1,0 +1,251 @@
+name: Release packages
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Every job uses this exact build: ZIP bytes depend on its zlib.
+  TDC_PYTHON: '3.15.2'
+
+jobs:
+  tests:
+    name: Native test suite
+    uses: ./.github/workflows/native-tests.yml
+    permissions:
+      contents: read
+
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.ref.outputs.version }}
+      rust: ${{ steps.ref.outputs.rust }}
+      mode: ${{ steps.ref.outputs.mode }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.TDC_PYTHON }}
+      - name: Validate the ref and Cargo version
+        id: ref
+        shell: bash
+        run: |
+          mode=rehearsal
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            python scripts/release.py check-tag
+            mode=tag
+          fi
+          version=$(python scripts/release.py version)
+          rust=$(python scripts/release.py rust-version)
+          printf 'mode=%s\nversion=%s\nrust=%s\n' "$mode" "$version" "$rust" >> "$GITHUB_OUTPUT"
+
+  native:
+    name: Package (${{ matrix.target }})
+    needs: prepare
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: macos-15
+            target: aarch64-apple-darwin
+          - image: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - image: windows-2025
+            target: x86_64-pc-windows-msvc
+    env:
+      TDC_TARGET: ${{ matrix.target }}
+      TDC_IMAGE: ${{ matrix.image }}
+      TDC_MODE: ${{ needs.prepare.outputs.mode }}
+      TDC_RUST: ${{ needs.prepare.outputs.rust }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.TDC_PYTHON }}
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup toolchain install "$TDC_RUST" --profile minimal --target "$TDC_TARGET"
+      - name: Build and test two native archives on Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            export DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer
+            test "$(xcrun --sdk macosx --show-sdk-version)" = 15.5
+          fi
+          extra=()
+          # Pack the corresponding source once, from the Linux build's inputs.
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            extra=(--source-archive)
+          fi
+          python scripts/release.py build --target "$TDC_TARGET" --mode "$TDC_MODE" --output release-out "${extra[@]}"
+      - name: Build and test two native archives on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -version '[17.0,18.0)' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64 -winsdk=10.0.26100.0 -vcvars_ver=14.44'
+          if ($env:WindowsSDKVersion.TrimEnd('\') -ne '10.0.26100.0' -or $env:VCToolsVersion -notlike '14.44.*') {
+            throw 'Unexpected MSVC toolset or Windows SDK'
+          }
+          python scripts/release.py build --target $env:TDC_TARGET --mode $env:TDC_MODE --output release-out
+      - name: Store comparison diagnostics separately
+        if: failure() && hashFiles('release-out/diagnostics/difference.txt') != ''
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: release-differences-${{ matrix.target }}
+          path: release-out/diagnostics/
+          if-no-files-found: error
+      - name: Store smoke-tested target ZIP
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: release-input-${{ matrix.target }}
+          path: release-out/*.zip
+          if-no-files-found: error
+          compression-level: 0
+
+  advisories:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TDC_RUST: ${{ needs.prepare.outputs.rust }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.TDC_PYTHON }}
+      - name: Audit locked dependencies against pinned RustSec data
+        shell: bash
+        run: |
+          rustup toolchain install "$TDC_RUST" --profile minimal
+          export PATH="$(dirname "$(rustup which --toolchain "$TDC_RUST" cargo)"):$PATH"
+          scanner=$(bash scripts/release-audit.sh --version)
+          cargo install --locked --version "=$scanner" --root "$RUNNER_TEMP/audit-tool" cargo-deny
+          export CARGO_DENY="$RUNNER_TEMP/audit-tool/bin/cargo-deny"
+          cargo fetch --locked
+          bash scripts/release-audit.sh dependency-audit.json
+      - name: Store advisory result
+        if: always() && hashFiles('dependency-audit.json') != ''
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: release-input-audit
+          path: dependency-audit.json
+          if-no-files-found: error
+
+  wallet:
+    needs: [prepare, native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TDC_MODE: ${{ needs.prepare.outputs.mode }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.TDC_PYTHON }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-input-x86_64-unknown-linux-musl
+          path: wallet-archive
+          digest-mismatch: error
+      - name: Test wallet recovery with the packaged executable
+        shell: bash
+        run: |
+          archive=$(python scripts/release.py archive-name --target x86_64-unknown-linux-musl --mode "$TDC_MODE")
+          unzip -q "wallet-archive/$archive" bin/tdc-vanity -d wallet-archive
+          bash .github/scripts/core-wallet.sh wallet-archive/bin/tdc-vanity
+
+  assemble:
+    needs: [tests, prepare, native, advisories, wallet]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      TDC_MODE: ${{ needs.prepare.outputs.mode }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.TDC_PYTHON }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-input-*
+          path: deliverables
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Hash and verify final assets
+        shell: bash
+        run: |
+          python scripts/release.py checksums --mode "$TDC_MODE" --directory deliverables
+          cd deliverables
+          sha256sum --strict --check SHA256SUMS
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: release-${{ env.TDC_MODE }}-unsigned
+          path: deliverables/
+          if-no-files-found: error
+          compression-level: 0
+
+  sign:
+    needs: [prepare, assemble]
+    if: >-
+      github.event_name == 'push' && github.ref_type == 'tag' && github.ref_protected &&
+      needs.prepare.outputs.mode == 'tag' && vars.TDC_ENABLE_RELEASE_SIGNING == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release-signing
+    permissions:
+      id-token: write
+    steps:
+      - name: Require the signing environment to authorize this repository
+        shell: bash
+        env:
+          TDC_SIGNING_REPOSITORY: ${{ vars.TDC_SIGNING_REPOSITORY }}
+        run: test "$TDC_SIGNING_REPOSITORY" = "$GITHUB_REPOSITORY"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-tag-unsigned
+          path: deliverables
+          digest-mismatch: error
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: 'v3.1.4'
+      - name: Sign and verify the manifest using the protected tag identity
+        shell: bash
+        working-directory: deliverables
+        run: |
+          sha256sum --strict --check SHA256SUMS
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+          cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: release-tag-signed
+          path: deliverables/
+          if-no-files-found: error
+          compression-level: 0

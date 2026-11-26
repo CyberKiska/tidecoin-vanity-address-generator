@@ -4,9 +4,10 @@ use std::ops::RangeInclusive;
 
 use ripemd::Ripemd160;
 use sha2::{Digest, Sha256};
+use tide_fn_dsa_comm::{codec, mq};
 use tide_fn_dsa_kgen::{
-    DeterministicKeyGenError, FALCON_KEYGEN_SEED_SIZE, FN_DSA_LOGN_512, KeyPairGenerator512,
-    SIGN_KEY_SIZE_512, VRFY_KEY_SIZE_512,
+    FALCON_KEYGEN_SEED_SIZE, FN_DSA_LOGN_512, KeyPairGenerator512, SIGN_KEY_SIZE_512,
+    VRFY_KEY_SIZE_512,
 };
 use tide_fn_dsa_sign::{SigningKey, SigningKey512};
 use zeroize::Zeroizing;
@@ -17,7 +18,7 @@ const WIF_VERSION: u8 = 125;
 const SCHEME: u8 = 7;
 pub type ScriptHash = [u8; 20];
 pub type Address = [u8; ADDRESS_LEN];
-type Public = [u8; VRFY_KEY_SIZE_512];
+pub type Public = [u8; VRFY_KEY_SIZE_512];
 
 pub struct KeyPair {
     // Keep one allocation at a stable address even when transferring a winning pair.
@@ -26,35 +27,29 @@ pub struct KeyPair {
 }
 
 impl KeyPair {
-    pub fn empty() -> Self {
+    fn empty() -> Self {
         Self {
             secret: Zeroizing::new(vec![0; SIGN_KEY_SIZE_512].into_boxed_slice()),
             public: [0; VRFY_KEY_SIZE_512],
         }
     }
 
-    pub fn generate(&mut self, generator: &mut KeyPairGenerator512) -> io::Result<()> {
-        let mut seed = Zeroizing::new([0; FALCON_KEYGEN_SEED_SIZE]);
-        for _ in 0..10_000 {
-            getrandom::fill(&mut *seed).map_err(io::Error::other)?;
-            match generator.keygen_from_seed_pqclean(
-                FN_DSA_LOGN_512,
-                &*seed,
-                &mut self.secret,
-                &mut self.public,
-            ) {
-                Ok(()) => return Ok(()),
-                Err(DeterministicKeyGenError::RejectedSeed) => continue,
-                Err(e) => return Err(io::Error::other(e.to_string())),
-            }
-        }
-        Err(io::Error::other(
-            "Falcon key generation exhausted Core's retry limit",
-        ))
+    /// Full Rust keygen using the PQClean sampling path, which retries internally
+    /// until a pair passes. Core's different floating-point norm summation order
+    /// can affect pair acceptance near the bound.
+    pub fn from_seed(
+        generator: &mut KeyPairGenerator512,
+        seed: &[u8; FALCON_KEYGEN_SEED_SIZE],
+    ) -> io::Result<Self> {
+        let mut pair = Self::empty();
+        generator
+            .keygen_from_seed_pqclean(FN_DSA_LOGN_512, seed, &mut pair.secret, &mut pair.public)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(pair)
     }
 
-    pub fn script_hash(&self) -> ScriptHash {
-        script_hash(&self.public)
+    pub fn public(&self) -> &Public {
+        &self.public
     }
 
     pub fn verified_wif(&self, expected: &Address) -> io::Result<Zeroizing<Vec<u8>>> {
@@ -68,6 +63,8 @@ impl KeyPair {
                 "public key or address disagrees with the secret key",
             ));
         }
+        check_ntru_equation(&self.secret)
+            .ok_or_else(|| io::Error::other("the secret key fails the NTRU equation"))?;
         // 0x7d || raw secret || 0x01 || raw public || checksum.
         let mut body = Zeroizing::new(Vec::with_capacity(
             SIGN_KEY_SIZE_512 + 1 + VRFY_KEY_SIZE_512,
@@ -85,7 +82,48 @@ impl KeyPair {
     }
 }
 
-fn script_hash(public: &Public) -> ScriptHash {
+/// Core's keygen ends by checking fG - gF = q, which the Rust solver omits.
+/// Key decoding only range-checks G = gF/f mod q: F = 0 gives G = 0 and passes,
+/// yet such a key cannot sign. Check the equation over the integers.
+fn check_ntru_equation(secret: &[u8]) -> Option<()> {
+    const N: usize = 1 << FN_DSA_LOGN_512;
+    let logn = FN_DSA_LOGN_512;
+    let mut polys = Zeroizing::new([[0i8; N]; 4]);
+    let [f, g, big_f, big_g] = &mut *polys;
+    let j = 1 + codec::trim_i8_decode(&secret[1..], f, 6).ok()?;
+    let j = j + codec::trim_i8_decode(&secret[j..], g, 6).ok()?;
+    codec::trim_i8_decode(&secret[j..], big_f, 8).ok()?;
+
+    // G = h * F mod q with h = g / f, then require small coefficients.
+    let mut ntt = Zeroizing::new([[0u16; N]; 2]);
+    let [h, w] = &mut *ntt;
+    mq::mqpoly_small_to_int(logn, g, h);
+    mq::mqpoly_small_to_int(logn, f, w);
+    mq::mqpoly_int_to_NTT(logn, h);
+    mq::mqpoly_int_to_NTT(logn, w);
+    mq::mqpoly_div_ntt(logn, h, w).then_some(())?;
+    mq::mqpoly_small_to_int(logn, big_f, w);
+    mq::mqpoly_int_to_NTT(logn, w);
+    mq::mqpoly_mul_ntt(logn, w, h);
+    mq::mqpoly_NTT_to_int(logn, w);
+    mq::mqpoly_int_to_small(logn, w, big_g).then_some(())?;
+
+    // Negacyclic product over the integers, where x^N = -1.
+    let mut d = [0i32; N];
+    for i in 0..N {
+        for j in 0..N {
+            let t = f[i] as i32 * big_g[j] as i32 - g[i] as i32 * big_f[j] as i32;
+            if i + j < N {
+                d[i + j] += t;
+            } else {
+                d[i + j - N] -= t;
+            }
+        }
+    }
+    (d[0] == 12289 && d[1..].iter().all(|&x| x == 0)).then_some(())
+}
+
+pub fn script_hash(public: &Public) -> ScriptHash {
     // CPubKey::GetID hashes all 898 bytes, including both the scheme and Falcon headers.
     let sha = Sha256::new()
         .chain_update([SCHEME])
@@ -95,13 +133,6 @@ fn script_hash(public: &Public) -> ScriptHash {
     redeem[1] = 20;
     redeem[2..].copy_from_slice(&Ripemd160::digest(sha));
     Ripemd160::digest(Sha256::digest(redeem)).into()
-}
-
-pub fn is_address(text: &Address) -> bool {
-    bs58::decode(text)
-        .with_check(Some(SCRIPT_VERSION))
-        .onto(&mut [0; 25][..])
-        == Ok(21)
 }
 
 pub fn address(hash: &ScriptHash) -> Address {
@@ -200,13 +231,34 @@ mod tests {
         let prefixed = hex::decode(f.next().unwrap()).unwrap();
         assert_eq!(prefixed[0], SCHEME);
         pair.public.copy_from_slice(&prefixed[1..]);
-        let addr = address(&pair.script_hash());
+        let addr = address(&script_hash(&pair.public));
         assert_eq!(&addr, b"TDGs8UFaMRu5Ru8hBAE7SNkwrtYXBaFXHU");
         assert_eq!(
             pair.verified_wif(&addr).unwrap().as_slice(),
             f.next().unwrap().as_bytes()
         );
         pair.public[20] ^= 1;
-        assert!(pair.verified_wif(&address(&pair.script_hash())).is_err());
+        assert!(
+            pair.verified_wif(&address(&script_hash(&pair.public)))
+                .is_err()
+        );
+        pair.public[20] ^= 1;
+
+        // F = 0 keeps h = g/f and yields G = 0, which key decoding accepts.
+        pair.secret[1 + 384 + 384..].fill(0);
+        let mut derived = [0; VRFY_KEY_SIZE_512];
+        SigningKey512::decode(&pair.secret)
+            .unwrap()
+            .to_verifying_key(&mut derived)
+            .unwrap();
+        assert_eq!(derived, pair.public);
+        assert!(pair.verified_wif(&addr).is_err());
+
+        #[cfg(target_arch = "x86_64")]
+        let avx2 = tide_fn_dsa_comm::has_avx2();
+        #[cfg(not(target_arch = "x86_64"))]
+        let avx2 = false;
+        let decoder = if avx2 { "AVX2" } else { "portable" };
+        println!("PASS Falcon WIF validation: {decoder} key decoder");
     }
 }
